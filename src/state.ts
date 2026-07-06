@@ -18,7 +18,7 @@ export type Tier = "safe" | "confirm" | "manual";
 export interface ActionDef { cmd: string; tier?: Tier; window?: string }
 export interface Service { name?: string; kind?: string; url?: string; port?: number }
 export interface Config {
-  name?: string; focus?: string; repo?: string; notes?: string; changelog?: string;
+  name?: string; focus?: string; repo?: string; notes?: string; changelog?: string; plan?: string;
   services?: Service[]; env_files?: string[]; actions?: Record<string, ActionDef>;
 }
 export interface Project { root: string; name: string; cfg: Config; hasConfig: boolean }
@@ -121,9 +121,13 @@ export function localService(p: Project): Service | undefined {
   return p.cfg.services?.find((s) => s.kind === "local");
 }
 
-export function attentionItems(p: Project, git: GitState, agent?: AgentInfo): string[] {
+export function attentionItems(p: Project, git: GitState, agent?: AgentInfo, plan?: Plan | null): string[] {
   const items: string[] = [];
   if (agent?.state === "waiting") items.push("agent waiting for you");
+  if (plan) {
+    const q = plan.direction.filter((d) => !d.done).length;
+    if (q > 0) items.push(`${q} open question${q > 1 ? "s" : ""}`);
+  }
   if (git.dirty.length > 0) items.push(`${git.dirty.length} uncommitted`);
   if (git.ahead) items.push(`${git.ahead} unpushed`);
   if (git.behind) items.push(`${git.behind} behind remote`);
@@ -364,6 +368,60 @@ export function readAudit(maxLines = 200): string {
   if (!existsSync(AUDIT_FILE)) return "";
   const lines = readFileSync(AUDIT_FILE, "utf8").trimEnd().split("\n");
   return lines.slice(-maxLines).join("\n");
+}
+
+// ---------- plan.md (features / tickets / direction) ----------
+// Convention: `## Direction` holds checkbox questions (checked = answered);
+// `## Features` holds `### <feature>` blocks with checkbox tickets.
+// The file is the source of truth; strike-through/sorting are rendering rules only.
+
+export interface PlanItem { done: boolean; text: string }
+export interface PlanFeature { name: string; tickets: PlanItem[] }
+export interface Plan { path: string; direction: PlanItem[]; features: PlanFeature[] }
+
+const PLAN_CANDIDATES = ["plan.md", "PLAN.md", "planning/plan.md"];
+
+export function readPlan(p: Project): Plan | null {
+  const candidates = p.cfg.plan ? [p.cfg.plan, ...PLAN_CANDIDATES] : PLAN_CANDIDATES;
+  for (const rel of candidates) {
+    const full = join(p.root, rel);
+    if (!existsSync(full)) continue;
+    const plan: Plan = { path: rel, direction: [], features: [] };
+    let section: "direction" | "features" | null = null;
+    let feature: PlanFeature | null = null;
+    for (const line of readFileSync(full, "utf8").split("\n")) {
+      const h2 = line.match(/^##(?!#)\s+(.+)/);
+      if (h2) {
+        const t = h2[1].trim().toLowerCase();
+        section = t.startsWith("direction") ? "direction" : t.startsWith("feature") ? "features" : null;
+        feature = null;
+        continue;
+      }
+      const h3 = line.match(/^###\s+(.+)/);
+      if (h3) {
+        if (section === "features") { feature = { name: h3[1].trim(), tickets: [] }; plan.features.push(feature); }
+        continue;
+      }
+      const cb = line.match(/^\s*[-*]\s*\[( |x|X)\]\s+(.+)/);
+      if (!cb) continue;
+      const item = { done: cb[1].toLowerCase() === "x", text: cb[2].trim() };
+      if (section === "direction") plan.direction.push(item);
+      else if (section === "features" && feature) feature.tickets.push(item);
+    }
+    return plan;
+  }
+  return null;
+}
+
+export function planStats(plan: Plan) {
+  const tickets = plan.features.flatMap((f) => f.tickets);
+  return {
+    openQuestions: plan.direction.filter((d) => !d.done).length,
+    featuresTotal: plan.features.length,
+    featuresDone: plan.features.filter((f) => f.tickets.length > 0 && f.tickets.every((t) => t.done)).length,
+    ticketsTotal: tickets.length,
+    ticketsDone: tickets.filter((t) => t.done).length,
+  };
 }
 
 // ---------- audit ----------

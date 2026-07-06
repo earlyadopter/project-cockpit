@@ -11,8 +11,8 @@ import {
   AUDIT_FILE, OPEN_TARGETS, REGISTRY_FILE,
   type Project, type Tier,
   agentState, allProjects, attentionItems, audit, claudeCwds, ensureSession, gitState,
-  humanAge, loadProject, loadRegistry, localService, openTarget, portListening,
-  saveRegistry, sendToWindow, sh, tmuxSessionAlive, tmuxWindows,
+  humanAge, loadProject, loadRegistry, localService, openTarget, planStats, portListening,
+  readPlan, saveRegistry, sendToWindow, sh, tmuxSessionAlive, tmuxWindows,
 } from "./state.ts";
 import { readFileSync } from "node:fs";
 
@@ -71,7 +71,7 @@ async function cmdList(): Promise<void> {
       svc?.port ? portListening(svc.port) : Promise.resolve(null),
       agentState(p, cwds),
     ]);
-    const attention = attentionItems(p, git, agent);
+    const attention = attentionItems(p, git, agent, readPlan(p));
     return { p, git, session, devUp, agent, attention };
   }));
   rows.sort((a, b) => (b.attention.length ? 1 : 0) - (a.attention.length ? 1 : 0) || a.p.name.localeCompare(b.p.name));
@@ -92,7 +92,8 @@ async function cmdList(): Promise<void> {
 async function cmdStatus(query: string): Promise<void> {
   const p = findProject(query);
   const [git, agent] = await Promise.all([gitState(p.root), claudeCwds().then((c) => agentState(p, c))]);
-  const attention = attentionItems(p, git, agent);
+  const plan = readPlan(p);
+  const attention = attentionItems(p, git, agent, plan);
 
   console.log(`\n${bold(p.name)}  ${dim(p.root)}`);
   if (p.cfg.focus) console.log(`  focus: ${p.cfg.focus}`);
@@ -120,6 +121,12 @@ async function cmdStatus(query: string): Promise<void> {
     : agent.state === "waiting" ? yellow("waiting for you ✋")
     : agent.state === "idle" ? dim("idle") : dim("none");
   console.log(`\n  ${bold("agent")} ${agentLabel}${agent.state !== "none" ? dim(` — ${agent.detail}${agent.ageSec !== null ? `, last activity ${humanAge(agent.ageSec)}` : ""}${agent.procs > 1 ? `, ${agent.procs} instances` : ""}`) : ""}`);
+
+  if (plan) {
+    const s = planStats(plan);
+    const q = s.openQuestions ? yellow(`, ${s.openQuestions} open question${s.openQuestions > 1 ? "s" : ""}`) : "";
+    console.log(`\n  ${bold("plan")} ${s.featuresDone}/${s.featuresTotal} features done, ${s.ticketsDone}/${s.ticketsTotal} tickets${q} ${dim(`(${plan.path})`)}`);
+  }
 
   if (p.cfg.services?.length) {
     console.log(`\n  ${bold("services")}`);

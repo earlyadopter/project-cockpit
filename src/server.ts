@@ -13,9 +13,9 @@ import { statSync } from "node:fs";
 import {
   type Project,
   agentState, allProjects, attentionItems, audit, claudeCwds, discoverCandidates,
-  gitState, humanAge, lastPush, loadProject, loadRegistry, localService, openTarget, portListening,
-  readAudit, readChangelog, recentCommits, runInline, saveRegistry, sendToWindow,
-  tmuxSessionAlive, tmuxWindows,
+  gitState, humanAge, lastPush, loadProject, loadRegistry, localService, openTarget,
+  planStats, portListening, readAudit, readChangelog, readPlan, recentCommits, runInline,
+  saveRegistry, sendToWindow, tmuxSessionAlive, tmuxWindows,
 } from "./state.ts";
 
 async function projectSummary(p: Project, cwds: Awaited<ReturnType<typeof claudeCwds>>) {
@@ -26,12 +26,14 @@ async function projectSummary(p: Project, cwds: Awaited<ReturnType<typeof claude
     svc?.port ? portListening(svc.port) : Promise.resolve(null),
     agentState(p, cwds),
   ]);
+  const plan = readPlan(p);
   return {
     name: p.name, root: p.root, focus: p.cfg.focus ?? "", branch: git.branch,
     dirty: git.dirty.length, ahead: git.ahead, behind: git.behind,
     session, devPort: svc?.port ?? null, devUp,
     agent: { ...agent, age: humanAge(agent.ageSec) },
-    attention: attentionItems(p, git, agent),
+    plan, planStats: plan ? planStats(plan) : null,
+    attention: attentionItems(p, git, agent, plan),
   };
 }
 
@@ -253,6 +255,18 @@ const PAGE = `<!doctype html>
   #palette .item.hot, #palette .item:hover, #addmodal .item:hover { background: var(--chip-bg); }
   #palette .item .k2, #addmodal .item .k2 { color: var(--ink-3); font-size: 12px; margin-left: auto; flex: none; }
   #addmodal .hdr { padding: 8px 16px 4px; color: var(--ink-3); font-size: 12px; }
+  .plansec { font-size: 11px; letter-spacing: .07em; text-transform: uppercase; color: var(--ink-3); margin: 10px 0 4px; }
+  .plq { padding: 2px 0; } .plq.done { color: var(--ink-3); }
+  .feat { padding: 6px 0; border-top: 1px solid var(--border); }
+  .feat:first-of-type { border-top: 0; }
+  .feat.done .fhead { color: var(--ink-3); }
+  .fhead { font-weight: 600; display: flex; align-items: center; gap: 10px; }
+  .fprog { margin-left: auto; display: flex; align-items: center; gap: 7px; font-weight: 400; font-size: 12px; color: var(--ink-3); }
+  .fbar { width: 90px; height: 6px; border-radius: 3px; background: var(--chip-bg); border: 1px solid var(--border); overflow: hidden; display: inline-block; }
+  .fbar > span { display: block; height: 100%; background: var(--accent); }
+  .ftickets { margin-top: 3px; display: flex; flex-wrap: wrap; gap: 6px; }
+  .tk { background: var(--chip-bg); border: 1px solid var(--border); border-radius: 6px; padding: 2px 9px; font-size: 12.5px; }
+  .tk.done { color: var(--ink-3); }
 </style>
 </head>
 <body>
@@ -411,6 +425,35 @@ async function renderDetail() {
       <div class="mut" style="margin-top:8px">safe runs · confirm asks first · <span class="bad-t">manual is never run from here</span> — copy and paste it yourself. Everything is audit-logged.</div>\`
     : '<span class="mut">no actions declared</span><div id="runout"></div>';
 
+  let planBody = "", planHint = "";
+  if (d.plan) {
+    const s = d.planStats;
+    planHint = \`\${d.plan.path} · \${s.ticketsDone}/\${s.ticketsTotal} tickets\${s.openQuestions ? \` · \${s.openQuestions} open question\${s.openQuestions > 1 ? "s" : ""}\` : ""}\`;
+    const dirSorted = [...d.plan.direction].sort((a, b) => (a.done ? 1 : 0) - (b.done ? 1 : 0));
+    const dirHtml = dirSorted.length
+      ? \`<div class="plansec">Direction</div>\` + dirSorted.map((q) =>
+          q.done ? \`<div class="plq done">✓ <s>\${esc(q.text)}</s></div>\`
+                 : \`<div class="plq">? \${esc(q.text)}</div>\`).join("")
+      : "";
+    const featureDone = (f) => f.tickets.length > 0 && f.tickets.every((t) => t.done);
+    const featSorted = [...d.plan.features].sort((a, b) => (featureDone(a) ? 1 : 0) - (featureDone(b) ? 1 : 0));
+    const featHtml = featSorted.length
+      ? \`<div class="plansec">Features</div>\` + featSorted.map((f) => {
+          const done = f.tickets.filter((t) => t.done).length, total = f.tickets.length;
+          const fd = featureDone(f);
+          const tickets = [...f.tickets].sort((a, b) => (a.done ? 1 : 0) - (b.done ? 1 : 0))
+            .map((t) => t.done ? \`<span class="tk done"><s>\${esc(t.text)}</s></span>\` : \`<span class="tk">\${esc(t.text)}</span>\`).join("");
+          return \`<div class="feat \${fd ? "done" : ""}">
+            <div class="fhead">\${fd ? \`<s>\${esc(f.name)}</s>\` : esc(f.name)}
+              <span class="fprog"><span class="fbar"><span style="width:\${total ? Math.round((done / total) * 100) : 0}%"></span></span> \${done}/\${total}</span></div>
+            <div class="ftickets">\${tickets || '<span class="mut">no tickets yet</span>'}</div></div>\`;
+        }).join("")
+      : "";
+    planBody = (dirHtml + featHtml) || '<span class="mut">plan.md found but empty — add ## Direction and ## Features sections</span>';
+  } else {
+    planBody = '<span class="mut">no plan.md — create one at the repo root: <code>## Direction</code> with checkbox questions, <code>## Features</code> with <code>### feature</code> blocks of checkbox tickets. Done items get struck through and sink automatically.</span>';
+  }
+
   const clBody = d.changelog
     ? \`<pre>\${esc(d.changelog.text)}</pre>\`
     : '<span class="mut">no changelog found (looked for CHANGELOG.md, docs/changelog.md — or set <code>changelog:</code> in .project-cockpit.yml)</span>';
@@ -428,6 +471,7 @@ async function renderDetail() {
       \${card("ws", "Workspace", d.session ? "tmux ✓" : "", wsBody)}
       \${card("deploy", "Deploy", d.lastPush ? d.lastPush.age : "", deployBody)}
       \${card("commits", "Recent commits", "", commitsBody)}
+      \${card("plan", "Plan", planHint, planBody, true)}
       \${card("changelog", "Changelog", d.changelog ? d.changelog.path : "", clBody, true)}
       \${card("actions", "Actions", "", actionsBody, true)}
     </div>

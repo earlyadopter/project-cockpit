@@ -31,6 +31,15 @@ Phase 3 additions:
 - **Command palette** (`⌘K`): switch project, open targets, run actions.
 - **Audit log** view (sidebar footer).
 - **＋ Add project** (sidebar): type a path (`~` works), or one-click a discovered candidate — the server scans the parent folders of registered projects for git repos not yet in the registry.
+
+## Plan card (features · tickets · direction)
+
+If a repo has a `plan.md` (root; or set `plan:` in the config), the dashboard renders it as the **Plan** card. Convention — plain markdown, readable everywhere:
+
+- `## Direction` — checkbox questions about where the project should go; check when answered, keep the answer on the line
+- `## Features` — one `### <feature>` block per epic, checkbox tickets under it
+
+Rendering rules (the file is never reordered — checkboxes are the status): done tickets are struck through and sink within their feature; fully-done features are struck and sink to the bottom with a filled progress bar; open direction questions float to the top and raise an "N open questions" attention item. The foundation's docs rule tells Claude Code to keep the checkboxes current as it completes work, and the `plan.md` template ships with the base manifest. `cockpit status` shows a one-line summary.
 - The server binds `127.0.0.1` only and refuses cross-origin non-GET requests.
 
 ## Agent visibility (Phase 4)
