@@ -9,29 +9,32 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import {
   type Project,
-  allProjects, attentionItems, audit, gitState, lastPush, localService, openTarget,
-  portListening, readAudit, readChangelog, recentCommits, runInline, sendToWindow,
-  tmuxSessionAlive, tmuxWindows,
+  agentState, allProjects, attentionItems, audit, claudeCwds, gitState, humanAge,
+  lastPush, localService, openTarget, portListening, readAudit, readChangelog,
+  recentCommits, runInline, sendToWindow, tmuxSessionAlive, tmuxWindows,
 } from "./state.ts";
 
-async function projectSummary(p: Project) {
+async function projectSummary(p: Project, cwds: Awaited<ReturnType<typeof claudeCwds>>) {
   const svc = localService(p);
-  const [git, session, devUp] = await Promise.all([
+  const [git, session, devUp, agent] = await Promise.all([
     gitState(p.root),
     tmuxSessionAlive(p.name),
     svc?.port ? portListening(svc.port) : Promise.resolve(null),
+    agentState(p, cwds),
   ]);
   return {
     name: p.name, root: p.root, focus: p.cfg.focus ?? "", branch: git.branch,
     dirty: git.dirty.length, ahead: git.ahead, behind: git.behind,
     session, devPort: svc?.port ?? null, devUp,
-    attention: attentionItems(p, git),
+    agent: { ...agent, age: humanAge(agent.ageSec) },
+    attention: attentionItems(p, git, agent),
   };
 }
 
 async function projectDetail(p: Project) {
+  const cwds = await claudeCwds();
   const [summary, git, windows, push, commits] = await Promise.all([
-    projectSummary(p),
+    projectSummary(p, cwds),
     gitState(p.root),
     tmuxWindows(p.name),
     lastPush(p.root),
@@ -80,7 +83,8 @@ export function startServer(port = 4400) {
       }
 
       if (req.method === "GET" && url.pathname === "/api/projects") {
-        const projects = await Promise.all(allProjects().map(projectSummary));
+        const cwds = await claudeCwds();
+        const projects = await Promise.all(allProjects().map((p) => projectSummary(p, cwds)));
         projects.sort((a, b) => (b.attention.length ? 1 : 0) - (a.attention.length ? 1 : 0) || a.name.localeCompare(b.name));
         return json(projects);
       }
@@ -261,7 +265,7 @@ async function refresh() {
   document.getElementById("side").innerHTML = projectsCache.map((p) => \`
     <button class="proj \${p.name === selected ? "sel" : ""}" onclick="pick('\${esc(p.name)}')">
       <div class="nm"><span class="dot \${p.attention.length ? "warn" : "ok"}"></span>\${esc(p.name)}</div>
-      <div class="sub">\${esc(p.branch || "—")}\${p.session ? " · tmux" : ""}\${p.devUp ? " · :" + p.devPort : ""}\${p.attention.length ? " · ▲ " + p.attention.length : ""}</div>
+      <div class="sub">\${esc(p.branch || "—")}\${p.session ? " · tmux" : ""}\${p.devUp ? " · :" + p.devPort : ""}\${p.agent.state === "working" ? " · agent ✳" : p.agent.state === "waiting" ? " · agent ✋" : ""}\${p.attention.length ? " · ▲ " + p.attention.length : ""}</div>
     </button>\`).join("");
   if (selected) renderDetail();
 }
@@ -339,8 +343,13 @@ async function renderDetail() {
       \${d.dirtyTotal ? \`<tr><td class="k">dirty (\${d.dirtyTotal})</td><td><pre>\${esc(d.dirtyFiles.join("\\n"))}\${d.dirtyTotal > 20 ? "\\n…" : ""}</pre></td></tr>\` : \`<tr><td class="k">worktree</td><td class="ok-t">clean ✓</td></tr>\`}
     </table>\` : '<span class="mut">not a git repository</span>';
 
+  const agentHtml = d.agent.state === "working" ? \`<span class="ok-t">working ✳</span> <span class="mut">— \${esc(d.agent.detail)}, \${esc(d.agent.age)}</span>\`
+    : d.agent.state === "waiting" ? \`<span style="color:var(--warn-ink)">waiting for you ✋</span> <span class="mut">— \${esc(d.agent.detail)}, \${esc(d.agent.age)}</span>\`
+    : d.agent.state === "idle" ? \`<span class="mut">idle — \${esc(d.agent.detail)}</span>\`
+    : '<span class="mut">none</span>';
   const wsBody = \`<table>
       <tr><td class="k">tmux</td><td>\${d.session ? \`<span class="ok-t">session running ✓</span> <span class="mut">(\${d.windows.map(esc).join(", ")})</span>\` : \`<span class="mut">no session — <code>cockpit go \${esc(d.name)}</code></span>\`}</td></tr>
+      <tr><td class="k">agent</td><td>\${agentHtml}\${d.agent.procs > 1 ? \` <span class="mut">(\${d.agent.procs} instances)</span>\` : ""}</td></tr>
       \${(d.services || []).filter((s) => s.port).map((s) => \`<tr><td class="k">:\${s.port}</td><td>\${s.up ? '<span class="ok-t">listening ✓</span>' : '<span class="mut">down</span>'} <span class="mut">\${esc(s.name || "")}</span></td></tr>\`).join("")}
       \${d.envFiles.length ? \`<tr><td class="k">env files</td><td class="mono">\${d.envFiles.map((f) => f.exists ? esc(f.path) : \`<span class="bad-t">\${esc(f.path)} missing</span>\`).join(", ")}</td></tr>\` : ""}
     </table>\`;

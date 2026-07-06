@@ -32,6 +32,17 @@ Phase 3 additions:
 - **Audit log** view (sidebar footer).
 - The server binds `127.0.0.1` only and refuses cross-origin non-GET requests.
 
+## Agent visibility (Phase 4)
+
+The cockpit detects Claude Code activity per project — best-effort, from two local traces: `claude` processes (matched to project roots by cwd) and session transcripts under `~/.claude/projects/` (mtime = last activity; the last message distinguishes a finished turn from a mid-turn stall, i.e. a likely permission prompt). States:
+
+- **working ✳** — process present, transcript written in the last ~45s
+- **waiting ✋** — process present, quiet: either "turn finished — waiting for your input" or "stalled mid-turn — possibly waiting for permission". Raises an `agent waiting for you` attention item.
+- **idle** — process present, no activity for 30+ min
+- **none** — no Claude Code process in that project
+
+Shown in `cockpit list` (agent✳ / agent✋ column), `cockpit status`, the dashboard sidebar, and the Workspace card. Heuristic by design — it reads undocumented traces and is never load-bearing: the cockpit still only *observes* agents, never drives them.
+
 ## Install
 
 Requires [bun](https://bun.sh) (runs the TypeScript directly — no build step) and tmux.

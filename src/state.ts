@@ -2,7 +2,7 @@
 // The filesystem is the source of truth — everything here recomputes live
 // from git/tmux/lsof on every call; nothing is cached.
 
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, statSync, writeFileSync } from "node:fs";
 import { execFile, spawnSync } from "node:child_process";
 import { promisify } from "node:util";
 import { homedir } from "node:os";
@@ -121,8 +121,9 @@ export function localService(p: Project): Service | undefined {
   return p.cfg.services?.find((s) => s.kind === "local");
 }
 
-export function attentionItems(p: Project, git: GitState): string[] {
+export function attentionItems(p: Project, git: GitState, agent?: AgentInfo): string[] {
   const items: string[] = [];
+  if (agent?.state === "waiting") items.push("agent waiting for you");
   if (git.dirty.length > 0) items.push(`${git.dirty.length} uncommitted`);
   if (git.ahead) items.push(`${git.ahead} unpushed`);
   if (git.behind) items.push(`${git.behind} behind remote`);
@@ -169,6 +170,103 @@ export function readChangelog(p: Project, maxLines = 80): { path: string; text: 
     }
   }
   return null;
+}
+
+// ---------- agent visibility (Phase 4) ----------
+// Claude Code leaves two observable traces: a `claude` process whose cwd is the
+// project root, and per-project transcript files under ~/.claude/projects/
+// (path encoded with non-alphanumerics as dashes) whose mtime tracks activity.
+// Heuristic, best-effort, never load-bearing.
+
+export type AgentStateKind = "working" | "waiting" | "idle" | "none";
+export interface AgentInfo {
+  procs: number;
+  state: AgentStateKind;
+  detail: string;
+  ageSec: number | null; // seconds since last transcript write
+}
+
+export async function claudeCwds(): Promise<Map<string, number>> {
+  const map = new Map<string, number>();
+  const ps = await shA("ps", ["-axo", "pid=,comm="]);
+  const pids = ps.out.split("\n")
+    .map((l) => l.trim().match(/^(\d+)\s+(.*)$/))
+    .filter((m): m is RegExpMatchArray => !!m && /(^|\/)claude$/.test(m[2]))
+    .map((m) => m[1]);
+  if (!pids.length) return map;
+  const r = await shA("lsof", ["-a", "-p", pids.join(","), "-d", "cwd", "-Fn"]);
+  for (const line of r.out.split("\n")) {
+    if (line.startsWith("n")) {
+      const path = line.slice(1).replace(/\/$/, "");
+      map.set(path, (map.get(path) ?? 0) + 1);
+    }
+  }
+  return map;
+}
+
+export function transcriptDir(root: string): string {
+  return join(homedir(), ".claude", "projects", root.replace(/[^a-zA-Z0-9]/g, "-"));
+}
+
+function readLastBytes(file: string, bytes = 65536): string {
+  const size = statSync(file).size;
+  const fd = openSync(file, "r");
+  try {
+    const len = Math.min(bytes, size);
+    const buf = Buffer.alloc(len);
+    readSync(fd, buf, 0, len, size - len);
+    return buf.toString("utf8");
+  } finally {
+    closeSync(fd);
+  }
+}
+
+// Scan a transcript tail backwards for the last user/assistant message and
+// report whether the turn looks finished (assistant text with no tool_use).
+function lastTurnFinished(file: string): boolean | null {
+  try {
+    const lines = readLastBytes(file).split("\n").filter(Boolean);
+    for (let i = lines.length - 1; i >= 0; i--) {
+      let e: any;
+      try { e = JSON.parse(lines[i]); } catch { continue; }
+      if (e?.type !== "assistant" && e?.type !== "user") continue;
+      if (e.type === "user") return false; // tool result / user msg mid-processing
+      const content = e.message?.content;
+      if (Array.isArray(content) && content.some((b: any) => b?.type === "tool_use")) return false;
+      return true; // assistant text/thinking only — turn complete
+    }
+  } catch { /* unreadable — unknown */ }
+  return null;
+}
+
+export async function agentState(p: Project, cwds: Map<string, number>): Promise<AgentInfo> {
+  const procs = cwds.get(p.root.replace(/\/$/, "")) ?? 0;
+  const dir = transcriptDir(p.root);
+  let newest: { file: string; mtime: number } | null = null;
+  if (existsSync(dir)) {
+    for (const f of readdirSync(dir)) {
+      if (!f.endsWith(".jsonl")) continue;
+      const full = join(dir, f);
+      const mt = statSync(full).mtimeMs;
+      if (!newest || mt > newest.mtime) newest = { file: full, mtime: mt };
+    }
+  }
+  const ageSec = newest ? Math.max(0, Math.round((Date.now() - newest.mtime) / 1000)) : null;
+
+  if (procs === 0) return { procs, state: "none", detail: "no Claude Code process", ageSec };
+  if (ageSec === null) return { procs, state: "idle", detail: "process running, no transcript found", ageSec };
+  if (ageSec > 30 * 60) return { procs, state: "idle", detail: "no activity for 30+ min", ageSec };
+  if (ageSec < 45) return { procs, state: "working", detail: "actively writing", ageSec };
+  const finished = lastTurnFinished(newest!.file);
+  if (finished === false) return { procs, state: "waiting", detail: "stalled mid-turn — possibly waiting for permission", ageSec };
+  return { procs, state: "waiting", detail: "turn finished — waiting for your input", ageSec };
+}
+
+export function humanAge(sec: number | null): string {
+  if (sec === null) return "";
+  if (sec < 60) return `${sec}s ago`;
+  if (sec < 3600) return `${Math.round(sec / 60)}m ago`;
+  return `${Math.round(sec / 3600)}h ago`;
 }
 
 // ---------- actions & opening (shared by CLI and dashboard) ----------

@@ -10,9 +10,9 @@ import { createInterface } from "node:readline/promises";
 import {
   AUDIT_FILE, OPEN_TARGETS, REGISTRY_FILE,
   type Project, type Tier,
-  allProjects, attentionItems, audit, ensureSession, gitState, loadProject, loadRegistry,
-  localService, openTarget, portListening, saveRegistry, sendToWindow, sh,
-  tmuxSessionAlive, tmuxWindows,
+  agentState, allProjects, attentionItems, audit, claudeCwds, ensureSession, gitState,
+  humanAge, loadProject, loadRegistry, localService, openTarget, portListening,
+  saveRegistry, sendToWindow, sh, tmuxSessionAlive, tmuxWindows,
 } from "./state.ts";
 import { readFileSync } from "node:fs";
 
@@ -62,15 +62,17 @@ function cmdAdd(pathArg?: string): void {
 async function cmdList(): Promise<void> {
   const projects = allProjects();
   if (projects.length === 0) die("no projects registered — run `cockpit add <path>` first");
+  const cwds = await claudeCwds();
   const rows = await Promise.all(projects.map(async (p) => {
     const svc = localService(p);
-    const [git, session, devUp] = await Promise.all([
+    const [git, session, devUp, agent] = await Promise.all([
       gitState(p.root),
       tmuxSessionAlive(p.name),
       svc?.port ? portListening(svc.port) : Promise.resolve(null),
+      agentState(p, cwds),
     ]);
-    const attention = attentionItems(p, git);
-    return { p, git, session, devUp, attention };
+    const attention = attentionItems(p, git, agent);
+    return { p, git, session, devUp, agent, attention };
   }));
   rows.sort((a, b) => (b.attention.length ? 1 : 0) - (a.attention.length ? 1 : 0) || a.p.name.localeCompare(b.p.name));
   const nameW = Math.max(...rows.map((r) => r.p.name.length)) + 2;
@@ -79,15 +81,18 @@ async function cmdList(): Promise<void> {
     const dot = r.attention.length ? yellow("●") : green("●");
     const sess = r.session ? cyan("tmux") : dim("    ");
     const dev = r.devUp === null ? dim("     ") : r.devUp ? green(`:${localService(r.p)!.port}`) : dim(`:${localService(r.p)!.port}✗`);
+    const ag = r.agent.state === "working" ? cyan("agent✳")
+      : r.agent.state === "waiting" ? yellow("agent✋")
+      : r.agent.state === "idle" ? dim("agent…") : dim("      ");
     const att = r.attention.length ? yellow(r.attention.join(", ")) : dim("clean");
-    console.log(`${dot} ${bold(r.p.name.padEnd(nameW))}${(r.git.branch || "-").padEnd(branchW)}${sess}  ${dev.padEnd(isTTY ? 14 : 6)} ${att}`);
+    console.log(`${dot} ${bold(r.p.name.padEnd(nameW))}${(r.git.branch || "-").padEnd(branchW)}${sess}  ${dev.padEnd(isTTY ? 14 : 6)} ${ag.padEnd(isTTY ? 15 : 7)} ${att}`);
   }
 }
 
 async function cmdStatus(query: string): Promise<void> {
   const p = findProject(query);
-  const git = await gitState(p.root);
-  const attention = attentionItems(p, git);
+  const [git, agent] = await Promise.all([gitState(p.root), claudeCwds().then((c) => agentState(p, c))]);
+  const attention = attentionItems(p, git, agent);
 
   console.log(`\n${bold(p.name)}  ${dim(p.root)}`);
   if (p.cfg.focus) console.log(`  focus: ${p.cfg.focus}`);
@@ -110,6 +115,11 @@ async function cmdStatus(query: string): Promise<void> {
 
   const alive = await tmuxSessionAlive(p.name);
   console.log(`\n  ${bold("tmux")} ${alive ? green(`session "${p.name}" running`) + dim(` (windows: ${(await tmuxWindows(p.name)).join(", ")})`) : dim(`no session — cockpit go ${p.name}`)}`);
+
+  const agentLabel = agent.state === "working" ? cyan("working ✳")
+    : agent.state === "waiting" ? yellow("waiting for you ✋")
+    : agent.state === "idle" ? dim("idle") : dim("none");
+  console.log(`\n  ${bold("agent")} ${agentLabel}${agent.state !== "none" ? dim(` — ${agent.detail}${agent.ageSec !== null ? `, last activity ${humanAge(agent.ageSec)}` : ""}${agent.procs > 1 ? `, ${agent.procs} instances` : ""}`) : ""}`);
 
   if (p.cfg.services?.length) {
     console.log(`\n  ${bold("services")}`);
