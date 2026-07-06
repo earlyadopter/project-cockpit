@@ -3,7 +3,7 @@
 // Spec: planning/cockpit-design.md §4 §8, github.com/earlyadopter/ai-foundation/issues/10
 // Shared state layer: ./state.ts. Dashboard server: ./server.ts.
 
-import { existsSync } from "node:fs";
+import { existsSync, unlinkSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { basename, join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
@@ -213,6 +213,47 @@ async function cmdRun(query: string, actionName?: string): Promise<void> {
   process.exit(r.status ?? 1);
 }
 
+// ---------- launchd (survive reboots) ----------
+const LAUNCH_LABEL = "com.project-cockpit.dash";
+const PLIST_PATH = join(process.env.HOME ?? "~", "Library", "LaunchAgents", `${LAUNCH_LABEL}.plist`);
+
+function installLaunchAgent(port: number): void {
+  const serverPath = new URL("./server.ts", import.meta.url).pathname;
+  const logPath = join(process.env.HOME ?? "~", ".project-cockpit", "dash.log");
+  const plist = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>${LAUNCH_LABEL}</string>
+  <key>ProgramArguments</key><array>
+    <string>${process.execPath}</string>
+    <string>${serverPath}</string>
+    <string>${port}</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>EnvironmentVariables</key><dict>
+    <key>PATH</key><string>${process.env.HOME}/.local/bin:${process.env.HOME}/.bun/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>StandardOutPath</key><string>${logPath}</string>
+  <key>StandardErrorPath</key><string>${logPath}</string>
+</dict></plist>
+`;
+  writeFileSync(PLIST_PATH, plist);
+  const uid = process.getuid?.() ?? 501;
+  sh("launchctl", ["bootout", `gui/${uid}/${LAUNCH_LABEL}`]); // ignore failure (not loaded)
+  const r = sh("launchctl", ["bootstrap", `gui/${uid}`, PLIST_PATH]);
+  if (!r.ok) die(`launchctl bootstrap failed — try: launchctl bootstrap gui/${uid} ${PLIST_PATH}`);
+  console.log(`installed: dashboard now starts at login and stays up (port ${port})`);
+  console.log(dim(`plist: ${PLIST_PATH}\nlogs:  ${logPath}\nremove with: cockpit dash --uninstall`));
+}
+
+function uninstallLaunchAgent(): void {
+  const uid = process.getuid?.() ?? 501;
+  sh("launchctl", ["bootout", `gui/${uid}/${LAUNCH_LABEL}`]);
+  if (existsSync(PLIST_PATH)) unlinkSync(PLIST_PATH);
+  console.log("uninstalled: dashboard no longer starts at login");
+}
+
 function cmdAudit(): void {
   if (!existsSync(AUDIT_FILE)) {
     console.log(dim("audit log is empty"));
@@ -232,6 +273,8 @@ function help(): void {
   cockpit open <project> <target>   ${OPEN_TARGETS.join(" | ")}
   cockpit run <project> <action>    run a declared action (tier-enforced, audited)
   cockpit dash [port]               start the dashboard (default http://localhost:4400)
+  cockpit dash --install            auto-start the dashboard at login (launchd)
+  cockpit dash --uninstall          remove the login auto-start
   cockpit add [path]                register a project (default: cwd)
   cockpit audit                     print the audit log
 
@@ -256,8 +299,10 @@ switch (cmd) {
   case "open": cmdOpen(args[0] ?? die("usage: cockpit open <project> <target>"), args[1]); break;
   case "run": await cmdRun(args[0] ?? die("usage: cockpit run <project> <action>"), args[1]); break;
   case "dash": {
+    const port = Number(args.find((a) => /^\d+$/.test(a))) || 4400;
+    if (args.includes("--install")) { installLaunchAgent(port); break; }
+    if (args.includes("--uninstall")) { uninstallLaunchAgent(); break; }
     const { startServer } = await import("./server.ts");
-    const port = Number(args[0]) || 4400;
     startServer(port);
     if (process.stdout.isTTY) sh("open", [`http://localhost:${port}`]);
     break;

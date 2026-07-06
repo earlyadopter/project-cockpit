@@ -51,7 +51,10 @@ Requires [bun](https://bun.sh) (runs the TypeScript directly — no build step) 
 ```bash
 cd cockpit && bun install
 ln -sf "$PWD/bin/cockpit" ~/.local/bin/cockpit
+cockpit dash --install   # optional: dashboard auto-starts at login and self-restarts (launchd)
 ```
+
+`--install` writes `~/Library/LaunchAgents/com.project-cockpit.dash.plist` (RunAtLoad + KeepAlive, PATH including Homebrew/bun so tmux detection works; logs at `~/.project-cockpit/dash.log`). Remove with `cockpit dash --uninstall`. After a reboot the dashboard is simply there — but tmux sessions are not: recreate each with `cockpit go <project>`, and resume a project's Claude conversation with `claude --continue` in its agent tab.
 
 ## Data
 
