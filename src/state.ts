@@ -172,6 +172,30 @@ export function readChangelog(p: Project, maxLines = 80): { path: string; text: 
   return null;
 }
 
+// Unregistered git repos in the parent folders of registered projects —
+// one-click "add project" candidates for the dashboard.
+export function discoverCandidates(): { path: string; name: string; hasConfig: boolean }[] {
+  const registered = new Set(loadRegistry().map((p) => p.replace(/\/$/, "")));
+  const parents = new Set([...registered].map((p) => join(p, "..")));
+  const found: { path: string; name: string; hasConfig: boolean }[] = [];
+  for (const parent of parents) {
+    let entries: string[] = [];
+    try { entries = readdirSync(parent); } catch { continue; }
+    for (const e of entries) {
+      if (e.startsWith(".")) continue;
+      const full = join(parent, e);
+      try {
+        if (!statSync(full).isDirectory()) continue;
+      } catch { continue; }
+      const real = full.replace(/\/$/, "");
+      if (registered.has(real)) continue;
+      if (!existsSync(join(real, ".git")) && !existsSync(join(real, ".project-cockpit.yml"))) continue;
+      found.push({ path: real, name: basename(real), hasConfig: existsSync(join(real, ".project-cockpit.yml")) });
+    }
+  }
+  return found.sort((a, b) => a.name.localeCompare(b.name));
+}
+
 // ---------- agent visibility (Phase 4) ----------
 // Claude Code leaves two observable traces: a `claude` process whose cwd is the
 // project root, and per-project transcript files under ~/.claude/projects/

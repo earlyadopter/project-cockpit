@@ -7,11 +7,15 @@
 
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { homedir } from "node:os";
+import { resolve } from "node:path";
+import { statSync } from "node:fs";
 import {
   type Project,
-  agentState, allProjects, attentionItems, audit, claudeCwds, gitState, humanAge,
-  lastPush, localService, openTarget, portListening, readAudit, readChangelog,
-  recentCommits, runInline, sendToWindow, tmuxSessionAlive, tmuxWindows,
+  agentState, allProjects, attentionItems, audit, claudeCwds, discoverCandidates,
+  gitState, humanAge, lastPush, loadProject, loadRegistry, localService, openTarget, portListening,
+  readAudit, readChangelog, recentCommits, runInline, saveRegistry, sendToWindow,
+  tmuxSessionAlive, tmuxWindows,
 } from "./state.ts";
 
 async function projectSummary(p: Project, cwds: Awaited<ReturnType<typeof claudeCwds>>) {
@@ -94,6 +98,30 @@ export function startServer(port = 4400) {
         const p = getProject(m[1]);
         if (!p) return json({ error: "not found" }, 404);
         return json(await projectDetail(p));
+      }
+
+      if (req.method === "GET" && url.pathname === "/api/candidates") {
+        return json(discoverCandidates());
+      }
+
+      if (req.method === "POST" && url.pathname === "/api/add") {
+        const body = await req.json().catch(() => ({}));
+        let path = String(body.path ?? "").trim();
+        if (!path) return json({ error: "path required" }, 400);
+        if (path.startsWith("~")) path = homedir() + path.slice(1);
+        path = resolve(path).replace(/\/$/, "");
+        try {
+          if (!statSync(path).isDirectory()) return json({ error: "not a directory" }, 400);
+        } catch {
+          return json({ error: `no such directory: ${path}` }, 400);
+        }
+        const paths = loadRegistry();
+        const name = loadProject(path).name;
+        if (paths.includes(path)) return json({ ok: true, already: true, path, name });
+        paths.push(path);
+        saveRegistry(paths);
+        audit(name, "add", "safe", `${path} [dash]`);
+        return json({ ok: true, path, name });
       }
 
       if (req.method === "GET" && url.pathname === "/api/audit") {
@@ -216,20 +244,22 @@ const PAGE = `<!doctype html>
   .runbtn:hover { border-color: var(--accent); color: var(--accent); }
   .runbtn:disabled { opacity: .5; cursor: wait; }
   kbd { font: 11px ui-monospace, Menlo, monospace; background: var(--chip-bg); border: 1px solid var(--border); border-bottom-width: 2px; border-radius: 4px; padding: 0 5px; }
-  #palette { position: fixed; inset: 0; background: var(--overlay); display: none; z-index: 10; }
-  #palette.open { display: block; }
-  #palette .box { width: min(560px, 90vw); margin: 12vh auto 0; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; box-shadow: 0 18px 50px rgba(0,0,0,.3); }
-  #palette input { width: 100%; border: 0; outline: 0; background: none; color: var(--ink); font: 16px inherit; padding: 14px 16px; border-bottom: 1px solid var(--border); }
-  #palette .items { max-height: 46vh; overflow-y: auto; }
-  #palette .item { padding: 9px 16px; cursor: pointer; display: flex; gap: 10px; align-items: baseline; }
-  #palette .item.hot, #palette .item:hover { background: var(--chip-bg); }
-  #palette .item .k2 { color: var(--ink-3); font-size: 12px; margin-left: auto; flex: none; }
+  #palette, #addmodal { position: fixed; inset: 0; background: var(--overlay); display: none; z-index: 10; }
+  #palette.open, #addmodal.open { display: block; }
+  #palette .box, #addmodal .box { width: min(560px, 90vw); margin: 12vh auto 0; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; box-shadow: 0 18px 50px rgba(0,0,0,.3); }
+  #palette input, #addmodal input { width: 100%; border: 0; outline: 0; background: none; color: var(--ink); font: 16px inherit; padding: 14px 16px; border-bottom: 1px solid var(--border); }
+  #palette .items, #addmodal .items { max-height: 46vh; overflow-y: auto; }
+  #palette .item, #addmodal .item { padding: 9px 16px; cursor: pointer; display: flex; gap: 10px; align-items: baseline; }
+  #palette .item.hot, #palette .item:hover, #addmodal .item:hover { background: var(--chip-bg); }
+  #palette .item .k2, #addmodal .item .k2 { color: var(--ink-3); font-size: 12px; margin-left: auto; flex: none; }
+  #addmodal .hdr { padding: 8px 16px 4px; color: var(--ink-3); font-size: 12px; }
 </style>
 </head>
 <body>
 <div class="layout">
   <aside>
     <h1>Projects</h1><div id="side"></div>
+    <button class="proj" onclick="openAdd()" style="color:var(--accent)">＋ Add project…</button>
     <div class="grow"></div>
     <div class="foot"><button onclick="openPalette()">⌘K command palette</button> · <button onclick="toggleAudit()">audit log</button></div>
   </aside>
@@ -239,6 +269,13 @@ const PAGE = `<!doctype html>
   <div class="box">
     <input id="palq" placeholder="Switch project, open, or run an action…" autocomplete="off">
     <div class="items" id="palitems"></div>
+  </div>
+</div>
+<div id="addmodal" onclick="if(event.target===this)closeAdd()">
+  <div class="box">
+    <input id="addpath" placeholder="Path to the project folder, e.g. ~/projects/my-app" autocomplete="off"
+      onkeydown="if(event.key==='Enter')submitAdd(this.value); if(event.key==='Escape')closeAdd()">
+    <div class="items" id="addcands"></div>
   </div>
 </div>
 <script>
@@ -435,6 +472,29 @@ document.addEventListener("keydown", (e) => {
   else if (e.key === "Enter" && items[palHot]) { closePalette(); items[palHot].fn(); }
 });
 document.getElementById("palq").addEventListener("input", () => { palHot = 0; renderPalette(); });
+
+// ---------- add project ----------
+async function openAdd() {
+  document.getElementById("addmodal").classList.add("open");
+  const inp = document.getElementById("addpath");
+  inp.value = ""; inp.focus();
+  const cands = await (await fetch("/api/candidates")).json();
+  document.getElementById("addcands").innerHTML =
+    (cands.length ? '<div class="hdr">Found near your projects — click to add:</div>' : "") +
+    cands.map((c) => \`<div class="item" onclick="submitAdd('\${esc(c.path)}')"><span>\${esc(c.name)}</span><span class="k2">\${c.hasConfig ? "has config · " : ""}\${esc(c.path)}</span></div>\`).join("");
+}
+function closeAdd() { document.getElementById("addmodal").classList.remove("open"); }
+async function submitAdd(path) {
+  if (!path.trim()) return;
+  const r = await fetch("/api/add", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path }) });
+  const d = await r.json();
+  if (!r.ok) { alert(d.error || "failed"); return; }
+  closeAdd();
+  selected = d.name;
+  location.hash = encodeURIComponent(selected);
+  openState = {};
+  refresh();
+}
 
 refresh();
 setInterval(refresh, 10000);

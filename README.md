@@ -30,6 +30,7 @@ Phase 3 additions:
 - **Open from the UI**: Cursor / Finder / Obsidian buttons (server-side `open`), web links for GitHub / deploy / local dev.
 - **Command palette** (`⌘K`): switch project, open targets, run actions.
 - **Audit log** view (sidebar footer).
+- **＋ Add project** (sidebar): type a path (`~` works), or one-click a discovered candidate — the server scans the parent folders of registered projects for git repos not yet in the registry.
 - The server binds `127.0.0.1` only and refuses cross-origin non-GET requests.
 
 ## Agent visibility (Phase 4)
