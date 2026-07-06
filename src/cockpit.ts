@@ -1,30 +1,19 @@
 #!/usr/bin/env bun
-// cockpit — Phase 1 CLI of the project cockpit.
+// cockpit — CLI of the project cockpit (Phase 1 + Phase 2 `dash`).
 // Spec: planning/cockpit-design.md §4 §8, github.com/earlyadopter/ai-foundation/issues/10
-// Reads: ~/.project-cockpit/registry.yml + <repo>/.project-cockpit.yml
-// Writes: ~/.project-cockpit/audit.log (append-only). Live state is never cached.
+// Shared state layer: ./state.ts. Dashboard server: ./server.ts.
 
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { execFile, spawnSync } from "node:child_process";
-import { promisify } from "node:util";
-import { homedir } from "node:os";
+import { existsSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { basename, join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
-import { load as yamlLoad, dump as yamlDump } from "js-yaml";
-
-const COCKPIT_DIR = join(homedir(), ".project-cockpit");
-const REGISTRY_FILE = join(COCKPIT_DIR, "registry.yml");
-const AUDIT_FILE = join(COCKPIT_DIR, "audit.log");
-const TMUX_WINDOWS = ["dev", "agent", "shell"];
-
-type Tier = "safe" | "confirm" | "manual";
-interface ActionDef { cmd: string; tier?: Tier; window?: string }
-interface Service { name?: string; kind?: string; url?: string; port?: number }
-interface Config {
-  name?: string; focus?: string; repo?: string; notes?: string;
-  services?: Service[]; env_files?: string[]; actions?: Record<string, ActionDef>;
-}
-interface Project { root: string; name: string; cfg: Config; hasConfig: boolean }
+import {
+  AUDIT_FILE, REGISTRY_FILE, TMUX_WINDOWS,
+  type Project, type Tier,
+  allProjects, attentionItems, audit, gitState, loadProject, loadRegistry,
+  localService, portListening, saveRegistry, sh, tmuxSessionAlive, tmuxWindows,
+} from "./state.ts";
+import { readFileSync } from "node:fs";
 
 // ---------- output helpers ----------
 const isTTY = !!process.stdout.isTTY;
@@ -41,53 +30,6 @@ function die(msg: string): never {
   process.exit(1);
 }
 
-// ---------- shell helpers ----------
-function sh(cmd: string, args: string[], cwd?: string): { ok: boolean; out: string } {
-  const r = spawnSync(cmd, args, { cwd, encoding: "utf8" });
-  return { ok: r.status === 0, out: ((r.stdout ?? "") as string).trim() };
-}
-
-const execFileP = promisify(execFile);
-async function shA(cmd: string, args: string[]): Promise<{ ok: boolean; out: string }> {
-  try {
-    const r = await execFileP(cmd, args, { encoding: "utf8" });
-    return { ok: true, out: r.stdout.trim() };
-  } catch {
-    return { ok: false, out: "" };
-  }
-}
-
-// ---------- registry ----------
-function loadRegistry(): string[] {
-  if (!existsSync(REGISTRY_FILE)) return [];
-  const doc = yamlLoad(readFileSync(REGISTRY_FILE, "utf8")) as { projects?: string[] } | null;
-  return doc?.projects ?? [];
-}
-
-function saveRegistry(paths: string[]): void {
-  mkdirSync(COCKPIT_DIR, { recursive: true });
-  writeFileSync(REGISTRY_FILE, yamlDump({ projects: paths }));
-}
-
-function loadProject(root: string): Project {
-  const cfgPath = join(root, ".project-cockpit.yml");
-  let cfg: Config = {};
-  let hasConfig = false;
-  if (existsSync(cfgPath)) {
-    try {
-      cfg = (yamlLoad(readFileSync(cfgPath, "utf8")) as Config) ?? {};
-      hasConfig = true;
-    } catch (e) {
-      console.error(yellow(`warning: could not parse ${cfgPath}: ${e}`));
-    }
-  }
-  return { root, name: cfg.name || basename(root), cfg, hasConfig };
-}
-
-function allProjects(): Project[] {
-  return loadRegistry().map(loadProject);
-}
-
 function findProject(query: string): Project {
   const projects = allProjects();
   if (projects.length === 0) die("no projects registered — run `cockpit add <path>` first");
@@ -98,74 +40,6 @@ function findProject(query: string): Project {
   if (prefix.length === 1) return prefix[0];
   if (prefix.length > 1) die(`ambiguous project "${query}": ${prefix.map((p) => p.name).join(", ")}`);
   die(`unknown project "${query}" — known: ${projects.map((p) => p.name).join(", ")}`);
-}
-
-// ---------- live state (recomputed every call, never cached) ----------
-interface GitState {
-  isRepo: boolean; branch: string; dirty: string[];
-  ahead: number | null; behind: number | null; hasUpstream: boolean;
-  lastCommit: string; lastCommitAge: string; hasRemote: boolean;
-}
-
-async function gitState(root: string): Promise<GitState> {
-  const s: GitState = {
-    isRepo: false, branch: "", dirty: [], ahead: null, behind: null,
-    hasUpstream: false, lastCommit: "", lastCommitAge: "", hasRemote: false,
-  };
-  if (!(await shA("git", ["-C", root, "rev-parse", "--git-dir"])).ok) return s;
-  s.isRepo = true;
-  const [branch, porcelain, remote, ab, log] = await Promise.all([
-    shA("git", ["-C", root, "branch", "--show-current"]),
-    shA("git", ["-C", root, "status", "--porcelain"]),
-    shA("git", ["-C", root, "remote"]),
-    shA("git", ["-C", root, "rev-list", "--left-right", "--count", "@{upstream}...HEAD"]),
-    shA("git", ["-C", root, "log", "-1", "--format=%s%n%cr"]),
-  ]);
-  s.branch = branch.out;
-  s.dirty = porcelain.out ? porcelain.out.split("\n") : [];
-  s.hasRemote = remote.out !== "";
-  if (ab.ok) {
-    s.hasUpstream = true;
-    const [behind, ahead] = ab.out.split(/\s+/).map(Number);
-    s.behind = behind;
-    s.ahead = ahead;
-  }
-  if (log.ok && log.out) [s.lastCommit, s.lastCommitAge] = log.out.split("\n");
-  return s;
-}
-
-async function tmuxSessionAlive(name: string): Promise<boolean> {
-  return (await shA("tmux", ["has-session", "-t", `=${name}`])).ok;
-}
-
-async function tmuxWindows(name: string): Promise<string[]> {
-  const r = await shA("tmux", ["list-windows", "-t", `=${name}`, "-F", "#{window_name}"]);
-  return r.ok && r.out ? r.out.split("\n") : [];
-}
-
-async function portListening(port: number): Promise<boolean> {
-  return (await shA("lsof", ["-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-t"])).ok;
-}
-
-function localService(p: Project): Service | undefined {
-  return p.cfg.services?.find((s) => s.kind === "local");
-}
-
-function attentionItems(p: Project, git: GitState): string[] {
-  const items: string[] = [];
-  if (git.dirty.length > 0) items.push(`${git.dirty.length} uncommitted`);
-  if (git.ahead) items.push(`${git.ahead} unpushed`);
-  if (git.behind) items.push(`${git.behind} behind remote`);
-  if (git.isRepo && git.hasRemote && !git.hasUpstream && git.lastCommit) items.push("no upstream set");
-  if (!p.hasConfig) items.push("no .project-cockpit.yml");
-  return items;
-}
-
-// ---------- audit ----------
-function audit(project: string, action: string, tier: string, result: string): void {
-  mkdirSync(COCKPIT_DIR, { recursive: true });
-  const line = [new Date().toISOString(), project, action, tier, result].join("\t") + "\n";
-  appendFileSync(AUDIT_FILE, line);
 }
 
 // ---------- commands ----------
@@ -197,7 +71,6 @@ async function cmdList(): Promise<void> {
     const attention = attentionItems(p, git);
     return { p, git, session, devUp, attention };
   }));
-  // needs-attention first, then by name
   rows.sort((a, b) => (b.attention.length ? 1 : 0) - (a.attention.length ? 1 : 0) || a.p.name.localeCompare(b.p.name));
   const nameW = Math.max(...rows.map((r) => r.p.name.length)) + 2;
   const branchW = Math.max(...rows.map((r) => (r.git.branch || "-").length)) + 2;
@@ -390,7 +263,7 @@ function cmdAudit(): void {
 }
 
 function help(): void {
-  console.log(`${bold("cockpit")} — local project cockpit (Phase 1)
+  console.log(`${bold("cockpit")} — local project cockpit
 
   cockpit list                      all projects, one status line each
   cockpit status <project>          full picture: git, tmux, services, actions
@@ -399,6 +272,7 @@ function help(): void {
                                      --no-cc for classic tmux UI, --cc to force)
   cockpit open <project> <target>   ${OPEN_TARGETS.join(" | ")}
   cockpit run <project> <action>    run a declared action (tier-enforced, audited)
+  cockpit dash [port]               start the dashboard (default http://localhost:4400)
   cockpit add [path]                register a project (default: cwd)
   cockpit audit                     print the audit log
 
@@ -422,6 +296,13 @@ switch (cmd) {
   }
   case "open": cmdOpen(args[0] ?? die("usage: cockpit open <project> <target>"), args[1]); break;
   case "run": await cmdRun(args[0] ?? die("usage: cockpit run <project> <action>"), args[1]); break;
+  case "dash": {
+    const { startServer } = await import("./server.ts");
+    const port = Number(args[0]) || 4400;
+    startServer(port);
+    if (process.stdout.isTTY) sh("open", [`http://localhost:${port}`]);
+    break;
+  }
   case "add": cmdAdd(args[0]); break;
   case "audit": cmdAudit(); break;
   case undefined: case "help": case "-h": case "--help": help(); break;

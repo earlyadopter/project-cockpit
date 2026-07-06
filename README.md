@@ -17,7 +17,12 @@ cockpit open <project> <target>   cursor | obsidian | finder | github | deploy |
 cockpit run <project> <action>    run a declared action — tier-enforced, audit-logged
 cockpit add [path]                register a project (default: cwd)
 cockpit audit                     print the audit log
+cockpit dash [port]               dashboard at http://localhost:4400 (Phase 2)
 ```
+
+## Dashboard (Phase 2)
+
+`cockpit dash` starts a read-only web UI on `localhost:4400` and opens it in the browser: a project sidebar (needs-attention first) and per-project collapsible cards — Git, Workspace (tmux + ports), Deploy (date of the last push to origin's default branch — the "last PROD deploy" proxy for push-to-deploy projects), Recent commits, Changelog (auto-detected, or set `changelog:` in the repo config), and declared Actions with their tiers. Light/dark follows the system. Refreshes every 10s; every request recomputes live state — stop and restart it freely, there is nothing to lose. Strictly read-only: running actions stays in the CLI (Phase 3 decision).
 
 ## Install
 
