@@ -12,7 +12,7 @@ import { resolve } from "node:path";
 import { statSync } from "node:fs";
 import {
   type Project,
-  agentState, allProjects, attentionItems, audit, claudeCwds, discoverCandidates,
+  agentState, allProjects, answerDirection, attentionItems, audit, claudeCwds, discoverCandidates,
   gitState, humanAge, lastPush, loadProject, loadRegistry, localService, openTarget,
   planStats, portListening, readAudit, readChangelog, readPlan, recentCommits, runInline,
   saveRegistry, sendToWindow, tmuxSessionAlive, tmuxWindows,
@@ -124,6 +124,19 @@ export function startServer(port = 4400) {
         saveRegistry(paths);
         audit(name, "add", "safe", `${path} [dash]`);
         return json({ ok: true, path, name });
+      }
+
+      if (req.method === "POST" && url.pathname === "/api/plan/answer") {
+        const body = await req.json().catch(() => ({}));
+        const p = getProject(String(body.project ?? ""));
+        if (!p) return json({ error: "unknown project" }, 404);
+        const question = String(body.question ?? "").trim();
+        const answer = String(body.answer ?? "").trim();
+        if (!question || !answer) return json({ error: "question and answer required" }, 400);
+        const r = answerDirection(p, question, answer);
+        if (!r.ok) return json({ error: r.error }, 400);
+        audit(p.name, "plan:answer", "safe", `${question.slice(0, 60)} → ${answer.slice(0, 60)} [dash]`);
+        return json({ ok: true });
       }
 
       if (req.method === "GET" && url.pathname === "/api/audit") {
@@ -256,7 +269,11 @@ const PAGE = `<!doctype html>
   #palette .item .k2, #addmodal .item .k2 { color: var(--ink-3); font-size: 12px; margin-left: auto; flex: none; }
   #addmodal .hdr { padding: 8px 16px 4px; color: var(--ink-3); font-size: 12px; }
   .plansec { font-size: 11px; letter-spacing: .07em; text-transform: uppercase; color: var(--ink-3); margin: 10px 0 4px; }
-  .plq { padding: 2px 0; } .plq.done { color: var(--ink-3); }
+  .plq { padding: 3px 0; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .plq.done { color: var(--ink-3); display: block; }
+  .ansline { display: inline-flex; gap: 6px; align-items: center; margin-left: auto; }
+  .ansline input { width: 300px; max-width: 40vw; font: 12.5px inherit; color: var(--ink); background: var(--chip-bg); border: 1px solid var(--border); border-radius: 6px; padding: 3px 9px; outline: none; }
+  .ansline input:focus { border-color: var(--accent); }
   .feat { padding: 6px 0; border-top: 1px solid var(--border); }
   .feat:first-of-type { border-top: 0; }
   .feat.done .fhead { color: var(--ink-3); }
@@ -368,6 +385,9 @@ async function toggleAudit() {
 }
 
 async function renderDetail() {
+  // don't clobber an answer being typed
+  const ae = document.activeElement;
+  if (ae && ae.tagName === "INPUT" && ae.id.startsWith("ansin-") ) return;
   const r = await fetch("/api/project/" + encodeURIComponent(selected));
   if (!r.ok) { document.getElementById("main").innerHTML = '<div class="empty">Project not found</div>'; return; }
   const d = await r.json();
@@ -430,10 +450,17 @@ async function renderDetail() {
     const s = d.planStats;
     planHint = \`\${d.plan.path} · \${s.ticketsDone}/\${s.ticketsTotal} tickets\${s.openQuestions ? \` · \${s.openQuestions} open question\${s.openQuestions > 1 ? "s" : ""}\` : ""}\`;
     const dirSorted = [...d.plan.direction].sort((a, b) => (a.done ? 1 : 0) - (b.done ? 1 : 0));
+    window._openQuestions = dirSorted.filter((q) => !q.done).map((q) => q.text);
+    let qi = -1;
     const dirHtml = dirSorted.length
-      ? \`<div class="plansec">Direction</div>\` + dirSorted.map((q) =>
-          q.done ? \`<div class="plq done">✓ <s>\${esc(q.text)}</s></div>\`
-                 : \`<div class="plq">? \${esc(q.text)}</div>\`).join("")
+      ? \`<div class="plansec">Direction</div>\` + dirSorted.map((q) => {
+          if (q.done) return \`<div class="plq done">✓ <s>\${esc(q.text)}</s></div>\`;
+          qi++;
+          return \`<div class="plq">? \${esc(q.text)}
+              <span class="ansline"><input id="ansin-\${qi}" placeholder="answer → becomes the decision + a ticket"
+                onkeydown="if(event.key==='Enter')submitAnswer(\${qi})">
+              <button class="runbtn" id="ansbtn-\${qi}" onclick="submitAnswer(\${qi})">decide</button></span></div>\`;
+        }).join("")
       : "";
     const featureDone = (f) => f.tickets.length > 0 && f.tickets.every((t) => t.done);
     const featSorted = [...d.plan.features].sort((a, b) => (featureDone(a) ? 1 : 0) - (featureDone(b) ? 1 : 0));
@@ -516,6 +543,20 @@ document.addEventListener("keydown", (e) => {
   else if (e.key === "Enter" && items[palHot]) { closePalette(); items[palHot].fn(); }
 });
 document.getElementById("palq").addEventListener("input", () => { palHot = 0; renderPalette(); });
+
+// ---------- plan: answer a direction question ----------
+async function submitAnswer(i) {
+  const input = document.getElementById("ansin-" + i);
+  const btn = document.getElementById("ansbtn-" + i);
+  const answer = (input?.value ?? "").trim();
+  if (!answer) { input?.focus(); return; }
+  const question = (window._openQuestions ?? [])[i];
+  if (btn) { btn.disabled = true; btn.textContent = "saving…"; }
+  const r = await fetch("/api/plan/answer", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ project: selected, question, answer }) });
+  const dd = await r.json();
+  if (!r.ok) { alert(dd.error || "failed"); if (btn) { btn.disabled = false; btn.textContent = "decide"; } return; }
+  refresh();
+}
 
 // ---------- add project ----------
 async function openAdd() {

@@ -39,7 +39,9 @@ If a repo has a `plan.md` (root; or set `plan:` in the config), the dashboard re
 - `## Direction` — checkbox questions about where the project should go; check when answered, keep the answer on the line
 - `## Features` — one `### <feature>` block per epic, checkbox tickets under it
 
-Rendering rules (the file is never reordered — checkboxes are the status): done tickets are struck through and sink within their feature; fully-done features are struck and sink to the bottom with a filled progress bar; open direction questions float to the top and raise an "N open questions" attention item. The foundation's docs rule tells Claude Code to keep the checkboxes current as it completes work, and the `plan.md` template ships with the base manifest. `cockpit status` shows a one-line summary.
+Rendering rules (the file is never reordered — checkboxes are the status): done tickets are struck through and sink within their feature; fully-done features are struck and sink to the bottom with a filled progress bar; open direction questions float to the top and raise an "N open questions" attention item.
+
+**Deciding from the dashboard:** every open Direction question has an inline answer field. Submitting it (a) checks the question in `plan.md` and appends `→ <answer> (decided <date>)`, and (b) queues the work — the answer becomes a ticket under a `### Implementation queue` feature (created on first use). Two surgical line edits, audit-logged as `plan:answer`; refine the queued ticket into proper features later. The foundation's docs rule tells Claude Code to keep the checkboxes current as it completes work, and the `plan.md` template ships with the base manifest. `cockpit status` shows a one-line summary.
 - The server binds `127.0.0.1` only and refuses cross-origin non-GET requests.
 
 ## Agent visibility (Phase 4)

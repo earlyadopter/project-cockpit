@@ -413,6 +413,44 @@ export function readPlan(p: Project): Plan | null {
   return null;
 }
 
+// Answer an open Direction question: check its box and append the decision,
+// then queue the answer as a ticket under "### Implementation queue".
+// Single-line, surgical edits — the rest of the file is untouched.
+export function answerDirection(p: Project, question: string, answer: string): { ok: boolean; error?: string } {
+  const plan = readPlan(p);
+  if (!plan) return { ok: false, error: "no plan.md in this project" };
+  const full = join(p.root, plan.path);
+  const lines = readFileSync(full, "utf8").split("\n");
+  const date = new Date().toISOString().slice(0, 10);
+
+  const qNorm = question.trim();
+  const idx = lines.findIndex((l) => {
+    const m = l.match(/^\s*[-*]\s*\[ \]\s+(.+)/);
+    return m && m[1].trim() === qNorm;
+  });
+  if (idx === -1) return { ok: false, error: "question not found (file changed since last refresh?)" };
+  lines[idx] = lines[idx].replace(/\[ \]\s+.*/, `[x] ${qNorm} → ${answer.trim()} (decided ${date})`);
+
+  const ticket = `- [ ] ${answer.trim()} — from: ${qNorm.replace(/\?+\s*$/, "")}?`;
+  const queueIdx = lines.findIndex((l) => /^###\s+Implementation queue\s*$/i.test(l));
+  if (queueIdx !== -1) {
+    // insert after the last ticket of the queue block
+    let end = queueIdx + 1;
+    while (end < lines.length && !/^##/.test(lines[end])) end++;
+    while (end > queueIdx + 1 && lines[end - 1].trim() === "") end--;
+    lines.splice(end, 0, ticket);
+  } else {
+    const featIdx = lines.findIndex((l) => /^##(?!#)\s+Features/i.test(l));
+    if (featIdx !== -1) {
+      lines.splice(featIdx + 1, 0, "", "### Implementation queue", "", ticket);
+    } else {
+      lines.push("", "## Features", "", "### Implementation queue", "", ticket);
+    }
+  }
+  writeFileSync(full, lines.join("\n"));
+  return { ok: true };
+}
+
 export function planStats(plan: Plan) {
   const tickets = plan.features.flatMap((f) => f.tickets);
   return {
