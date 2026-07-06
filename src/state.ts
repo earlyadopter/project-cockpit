@@ -451,6 +451,92 @@ export function answerDirection(p: Project, question: string, answer: string): {
   return { ok: true };
 }
 
+// Resolve "planning/NN" style references in a direction question to real files.
+export function findPlanningRefs(p: Project, text: string): { path: string; excerpt: string }[] {
+  const refs: { path: string; excerpt: string }[] = [];
+  const seen = new Set<string>();
+  const dirs = [join(p.root, "planning")];
+  try {
+    for (const e of readdirSync(p.root)) {
+      const d = join(p.root, e, "planning");
+      if (!e.startsWith(".") && existsSync(d)) dirs.push(d);
+    }
+  } catch { /* ignore */ }
+  const tokens = [...text.matchAll(/planning\/([A-Za-z0-9._-]+)/g)].map((m) => m[1].replace(/\.md$/, ""));
+  for (const token of tokens) {
+    for (const dir of dirs) {
+      if (!existsSync(dir)) continue;
+      let files: string[] = [];
+      try { files = readdirSync(dir); } catch { continue; }
+      const hit = files.find((f) => f === `${token}.md`) ?? files.find((f) => f.startsWith(token) && f.endsWith(".md"));
+      if (!hit) continue;
+      const full = join(dir, hit);
+      if (seen.has(full)) break;
+      seen.add(full);
+      const lines = readFileSync(full, "utf8").split("\n");
+      refs.push({
+        path: full.slice(p.root.length + 1),
+        excerpt: lines.slice(0, 120).join("\n") + (lines.length > 120 ? "\n…" : ""),
+      });
+      break;
+    }
+  }
+  return refs;
+}
+
+// Ask Claude (headless, no tools — context is inlined) for 3-5 decision options.
+export async function generateOptions(p: Project, question: string): Promise<{ options?: { label: string; detail: string }[]; raw?: string; error?: string }> {
+  const plan = readPlan(p);
+  const refs = findPlanningRefs(p, question);
+  const ctx = refs.map((r) => `--- ${r.path} ---\n${r.excerpt}`).join("\n\n").slice(0, 24000);
+  const planText = plan ? readFileSync(join(p.root, plan.path), "utf8").slice(0, 6000) : "";
+  const prompt = `You are helping decide a project direction question for the project "${p.name}".
+
+QUESTION: ${question}
+
+CURRENT PLAN (plan.md):
+${planText}
+
+CONTEXT FROM PLANNING DOCS:
+${ctx || "(none found)"}
+
+Propose 3-5 concrete, mutually distinct options for answering the question. Respond with ONLY a JSON array, no prose:
+[{"label": "<the option, max ~12 words, phrased as a decision>", "detail": "<one sentence: key tradeoff or why>"}]`;
+  try {
+    const { execFile } = await import("node:child_process");
+    const { promisify } = await import("node:util");
+    const r = await promisify(execFile)("claude", ["-p", prompt], {
+      cwd: p.root, encoding: "utf8", timeout: 180_000, maxBuffer: 1024 * 1024,
+      env: { ...process.env, PATH: `${process.env.HOME}/.local/bin:${process.env.PATH}` },
+    });
+    const out = r.stdout.trim();
+    const start = out.indexOf("["), end = out.lastIndexOf("]");
+    if (start !== -1 && end > start) {
+      try {
+        const options = JSON.parse(out.slice(start, end + 1));
+        if (Array.isArray(options) && options.every((o) => o?.label)) return { options };
+      } catch { /* fall through to raw */ }
+    }
+    return { raw: out.slice(0, 4000) };
+  } catch (e: any) {
+    return { error: `claude -p failed: ${String(e?.message ?? e).slice(0, 300)}` };
+  }
+}
+
+// Start implementing a just-made decision: new "impl" window in the project's
+// tmux session running Claude Code, pre-briefed with the decision. Visible and
+// attended — the human watches/steers it in the normal workspace.
+export async function startImplementation(p: Project, question: string, answer: string): Promise<{ ok: boolean; error?: string }> {
+  await ensureSession(p);
+  const wid = sh("tmux", ["new-window", "-d", "-P", "-F", "#{window_id}", "-t", `=${p.name}`, "-c", p.root, "-n", "impl"]).out;
+  if (!wid) return { ok: false, error: "could not create tmux window" };
+  const clean = (s: string) => s.replace(/[;`$\\!]/g, ",").replace(/"/g, "'");
+  const prompt = `We just decided a direction question in plan.md: '${clean(question)}' -> '${clean(answer)}'. Read plan.md, find the matching ticket under the Implementation queue feature, briefly plan the work, then start implementing it. Keep plan.md checkboxes current as you complete work.`;
+  sh("tmux", ["send-keys", "-l", "-t", wid, `claude "${prompt}"`]);
+  sh("tmux", ["send-keys", "-t", wid, "Enter"]);
+  return { ok: true };
+}
+
 export function planStats(plan: Plan) {
   const tickets = plan.features.flatMap((f) => f.tickets);
   return {

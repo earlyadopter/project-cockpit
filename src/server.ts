@@ -13,9 +13,10 @@ import { statSync } from "node:fs";
 import {
   type Project,
   agentState, allProjects, answerDirection, attentionItems, audit, claudeCwds, discoverCandidates,
-  gitState, humanAge, lastPush, loadProject, loadRegistry, localService, openTarget,
-  planStats, portListening, readAudit, readChangelog, readPlan, recentCommits, runInline,
-  saveRegistry, sendToWindow, tmuxSessionAlive, tmuxWindows,
+  findPlanningRefs, generateOptions, gitState, humanAge, lastPush, loadProject, loadRegistry,
+  localService, openTarget, planStats, portListening, readAudit, readChangelog, readPlan,
+  recentCommits, runInline, saveRegistry, sendToWindow, startImplementation,
+  tmuxSessionAlive, tmuxWindows,
 } from "./state.ts";
 
 async function projectSummary(p: Project, cwds: Awaited<ReturnType<typeof claudeCwds>>) {
@@ -139,6 +140,37 @@ export function startServer(port = 4400) {
         return json({ ok: true });
       }
 
+      if (req.method === "GET" && url.pathname === "/api/plan/hints") {
+        const p = getProject(url.searchParams.get("project") ?? "");
+        if (!p) return json({ error: "unknown project" }, 404);
+        return json({ refs: findPlanningRefs(p, url.searchParams.get("question") ?? "") });
+      }
+
+      if (req.method === "POST" && url.pathname === "/api/plan/options") {
+        const body = await req.json().catch(() => ({}));
+        const p = getProject(String(body.project ?? ""));
+        if (!p) return json({ error: "unknown project" }, 404);
+        const question = String(body.question ?? "").trim();
+        if (!question) return json({ error: "question required" }, 400);
+        audit(p.name, "plan:options", "safe", question.slice(0, 80) + " [dash]");
+        const r = await generateOptions(p, question);
+        if (r.error) return json({ error: r.error }, 500);
+        return json(r);
+      }
+
+      if (req.method === "POST" && url.pathname === "/api/plan/implement") {
+        const body = await req.json().catch(() => ({}));
+        const p = getProject(String(body.project ?? ""));
+        if (!p) return json({ error: "unknown project" }, 404);
+        const question = String(body.question ?? "").trim();
+        const answer = String(body.answer ?? "").trim();
+        if (!question || !answer) return json({ error: "question and answer required" }, 400);
+        const r = await startImplementation(p, question, answer);
+        if (!r.ok) return json({ error: r.error }, 500);
+        audit(p.name, "plan:implement", "confirm", `${answer.slice(0, 60)} [dash]`);
+        return json({ ok: true });
+      }
+
       if (req.method === "GET" && url.pathname === "/api/audit") {
         return new Response(readAudit(), { headers: { "content-type": "text/plain; charset=utf-8" } });
       }
@@ -259,9 +291,12 @@ const PAGE = `<!doctype html>
   .runbtn:hover { border-color: var(--accent); color: var(--accent); }
   .runbtn:disabled { opacity: .5; cursor: wait; }
   kbd { font: 11px ui-monospace, Menlo, monospace; background: var(--chip-bg); border: 1px solid var(--border); border-bottom-width: 2px; border-radius: 4px; padding: 0 5px; }
-  #palette, #addmodal { position: fixed; inset: 0; background: var(--overlay); display: none; z-index: 10; }
-  #palette.open, #addmodal.open { display: block; }
+  #palette, #addmodal, #hintmodal { position: fixed; inset: 0; background: var(--overlay); display: none; z-index: 10; }
+  #palette.open, #addmodal.open, #hintmodal.open { display: block; }
   #palette .box, #addmodal .box { width: min(560px, 90vw); margin: 12vh auto 0; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; box-shadow: 0 18px 50px rgba(0,0,0,.3); }
+  #hintmodal .box { width: min(760px, 92vw); margin: 8vh auto 0; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; box-shadow: 0 18px 50px rgba(0,0,0,.3); }
+  #hintmodal pre { margin: 4px 0 8px; max-height: 220px; }
+  .optitem { border-top: 1px solid var(--border); padding: 10px 0; }
   #palette input, #addmodal input { width: 100%; border: 0; outline: 0; background: none; color: var(--ink); font: 16px inherit; padding: 14px 16px; border-bottom: 1px solid var(--border); }
   #palette .items, #addmodal .items { max-height: 46vh; overflow-y: auto; }
   #palette .item, #addmodal .item { padding: 9px 16px; cursor: pointer; display: flex; gap: 10px; align-items: baseline; }
@@ -300,6 +335,12 @@ const PAGE = `<!doctype html>
   <div class="box">
     <input id="palq" placeholder="Switch project, open, or run an action…" autocomplete="off">
     <div class="items" id="palitems"></div>
+  </div>
+</div>
+<div id="hintmodal" onclick="if(event.target===this)closeHints()">
+  <div class="box">
+    <div style="padding:12px 16px;border-bottom:1px solid var(--border);font-weight:600" id="hinttitle"></div>
+    <div class="items" id="hintbody" style="max-height:60vh"></div>
   </div>
 </div>
 <div id="addmodal" onclick="if(event.target===this)closeAdd()">
@@ -385,9 +426,12 @@ async function toggleAudit() {
 }
 
 async function renderDetail() {
-  // don't clobber an answer being typed
+  // don't clobber an answer being typed or an open hints popup
   const ae = document.activeElement;
   if (ae && ae.tagName === "INPUT" && ae.id.startsWith("ansin-") ) return;
+  if (document.getElementById("hintmodal")?.classList.contains("open")) return;
+  const anyAnswer = [...document.querySelectorAll('input[id^="ansin-"]')].some((el) => el.value.trim());
+  if (anyAnswer) return;
   const r = await fetch("/api/project/" + encodeURIComponent(selected));
   if (!r.ok) { document.getElementById("main").innerHTML = '<div class="empty">Project not found</div>'; return; }
   const d = await r.json();
@@ -457,7 +501,8 @@ async function renderDetail() {
           if (q.done) return \`<div class="plq done">✓ <s>\${esc(q.text)}</s></div>\`;
           qi++;
           return \`<div class="plq">? \${esc(q.text)}
-              <span class="ansline"><input id="ansin-\${qi}" placeholder="answer → becomes the decision + a ticket"
+              <span class="ansline"><button class="runbtn" onclick="openHints(\${qi})">hints…</button>
+              <input id="ansin-\${qi}" placeholder="answer → decision + ticket"
                 onkeydown="if(event.key==='Enter')submitAnswer(\${qi})">
               <button class="runbtn" id="ansbtn-\${qi}" onclick="submitAnswer(\${qi})">decide</button></span></div>\`;
         }).join("")
@@ -555,7 +600,57 @@ async function submitAnswer(i) {
   const r = await fetch("/api/plan/answer", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ project: selected, question, answer }) });
   const dd = await r.json();
   if (!r.ok) { alert(dd.error || "failed"); if (btn) { btn.disabled = false; btn.textContent = "decide"; } return; }
+  if (confirm("Decision saved to plan.md.\\n\\nStart implementation now? This opens a Claude Code session in " + selected + "'s tmux workspace (new 'impl' window), briefed with this decision.")) {
+    const ir = await fetch("/api/plan/implement", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ project: selected, question, answer }) });
+    const id = await ir.json();
+    if (!ir.ok) alert(id.error || "failed to start implementation");
+    else alert("Implementation started in tmux window \\"impl\\" — watch it with: cockpit go " + selected);
+  }
   refresh();
+}
+
+// ---------- plan: hints & generated options ----------
+async function openHints(i) {
+  const question = (window._openQuestions ?? [])[i];
+  window._hintQ = i;
+  document.getElementById("hintmodal").classList.add("open");
+  const body = document.getElementById("hintbody");
+  document.getElementById("hinttitle").textContent = question;
+  body.innerHTML = '<div class="mut" style="padding:12px 16px">loading context…</div>';
+  const r = await fetch("/api/plan/hints?project=" + encodeURIComponent(selected) + "&question=" + encodeURIComponent(question));
+  const d = await r.json();
+  const refs = (d.refs ?? []).map((ref) =>
+    \`<details open style="margin:0 16px 10px"><summary style="padding:6px 0">\${esc(ref.path)}</summary><pre>\${esc(ref.excerpt)}</pre></details>\`).join("");
+  body.innerHTML =
+    (refs || '<div class="mut" style="padding:8px 16px">no referenced planning docs found in the question text</div>') +
+    \`<div style="padding:8px 16px 14px"><button class="runbtn" id="genbtn" onclick="genOptions()">✨ generate options with Claude</button>
+     <span class="mut" style="font-size:12px"> — reads the docs above + plan.md, ~30-60s</span><div id="optlist"></div></div>\`;
+}
+function closeHints() { document.getElementById("hintmodal").classList.remove("open"); }
+async function genOptions() {
+  const btn = document.getElementById("genbtn");
+  btn.disabled = true; btn.textContent = "thinking…";
+  const question = (window._openQuestions ?? [])[window._hintQ];
+  const r = await fetch("/api/plan/options", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ project: selected, question }) });
+  const d = await r.json();
+  btn.disabled = false; btn.textContent = "✨ generate options with Claude";
+  const list = document.getElementById("optlist");
+  if (!r.ok) { list.innerHTML = \`<div class="bad-t" style="padding:8px 0">\${esc(d.error || "failed")}</div>\`; return; }
+  if (d.options) {
+    list.innerHTML = '<div class="mut" style="padding:10px 0 4px;font-size:12px">click an option to prefill the answer — you still hit decide:</div>' +
+      d.options.map((o, oi) => \`<div class="item optitem" data-oi="\${oi}"><span><strong>\${esc(o.label)}</strong>\${o.detail ? \`<br><span class="mut">\${esc(o.detail)}</span>\` : ""}</span></div>\`).join("");
+    window._genOptions = d.options;
+    list.querySelectorAll(".optitem").forEach((el) => {
+      el.onclick = () => {
+        const o = window._genOptions[Number(el.dataset.oi)];
+        const input = document.getElementById("ansin-" + window._hintQ);
+        if (input) { input.value = o.label; input.focus(); }
+        closeHints();
+      };
+    });
+  } else {
+    list.innerHTML = \`<pre>\${esc(d.raw || "")}</pre>\`;
+  }
 }
 
 // ---------- add project ----------
