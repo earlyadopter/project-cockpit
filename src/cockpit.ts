@@ -8,10 +8,11 @@ import { spawnSync } from "node:child_process";
 import { basename, join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import {
-  AUDIT_FILE, REGISTRY_FILE, TMUX_WINDOWS,
+  AUDIT_FILE, OPEN_TARGETS, REGISTRY_FILE,
   type Project, type Tier,
-  allProjects, attentionItems, audit, gitState, loadProject, loadRegistry,
-  localService, portListening, saveRegistry, sh, tmuxSessionAlive, tmuxWindows,
+  allProjects, attentionItems, audit, ensureSession, gitState, loadProject, loadRegistry,
+  localService, openTarget, portListening, saveRegistry, sendToWindow, sh,
+  tmuxSessionAlive, tmuxWindows,
 } from "./state.ts";
 import { readFileSync } from "node:fs";
 
@@ -134,20 +135,9 @@ async function cmdStatus(query: string): Promise<void> {
   console.log();
 }
 
-async function ensureSession(p: Project): Promise<boolean> {
-  if (await tmuxSessionAlive(p.name)) return false;
-  const first = TMUX_WINDOWS[0];
-  if (!sh("tmux", ["new-session", "-d", "-s", p.name, "-c", p.root, "-n", first]).ok)
-    die(`failed to create tmux session "${p.name}"`);
-  for (const w of TMUX_WINDOWS.slice(1))
-    sh("tmux", ["new-window", "-d", "-t", `=${p.name}`, "-c", p.root, "-n", w]);
-  sh("tmux", ["select-window", "-t", `=${p.name}:${first}`]);
-  return true;
-}
-
 async function cmdGo(query: string, cc = false): Promise<void> {
   const p = findProject(query);
-  const created = await ensureSession(p);
+  const created = await ensureSession(p).catch((e) => die(String(e.message ?? e)));
   audit(p.name, "go", "safe", created ? "session-created" : "session-existed");
   if (process.env.TMUX) {
     // already inside tmux — just jump; -CC can't nest
@@ -162,53 +152,13 @@ async function cmdGo(query: string, cc = false): Promise<void> {
   }
 }
 
-const OPEN_TARGETS = ["cursor", "obsidian", "finder", "github", "deploy", "dev"] as const;
-
 function cmdOpen(query: string, target?: string): void {
   const p = findProject(query);
   if (!target) die(`what to open? one of: ${OPEN_TARGETS.join(", ")}`);
-  const svcUrl = (kinds: string[]) => p.cfg.services?.find((s) => s.kind && kinds.includes(s.kind))?.url;
-  let result = "";
-  switch (target) {
-    case "cursor": {
-      const r = sh("cursor", [p.root]);
-      if (!r.ok) sh("open", ["-a", "Cursor", p.root]);
-      result = p.root;
-      break;
-    }
-    case "obsidian":
-      if (!p.cfg.notes) die(`no notes: configured in ${p.name}/.project-cockpit.yml`);
-      sh("open", [p.cfg.notes]);
-      result = p.cfg.notes;
-      break;
-    case "finder":
-      sh("open", [p.root]);
-      result = p.root;
-      break;
-    case "github":
-      if (!p.cfg.repo) die(`no repo: configured for ${p.name}`);
-      sh("open", [p.cfg.repo]);
-      result = p.cfg.repo;
-      break;
-    case "deploy": {
-      const url = svcUrl(["vercel", "render"]);
-      if (!url) die(`no vercel/render service configured for ${p.name}`);
-      sh("open", [url]);
-      result = url;
-      break;
-    }
-    case "dev": {
-      const url = svcUrl(["local"]);
-      if (!url) die(`no local service configured for ${p.name}`);
-      sh("open", [url]);
-      result = url;
-      break;
-    }
-    default:
-      die(`unknown target "${target}" — one of: ${OPEN_TARGETS.join(", ")}`);
-  }
-  audit(p.name, `open:${target}`, "safe", result);
-  console.log(`opened ${target}: ${result}`);
+  const r = openTarget(p, target);
+  if (!r.ok) die(r.error!);
+  audit(p.name, `open:${target}`, "safe", r.result!);
+  console.log(`opened ${target}: ${r.result}`);
 }
 
 async function cmdRun(query: string, actionName?: string): Promise<void> {
@@ -242,8 +192,7 @@ async function cmdRun(query: string, actionName?: string): Promise<void> {
   }
 
   if (action.window) {
-    await ensureSession(p);
-    sh("tmux", ["send-keys", "-t", `=${p.name}:${action.window}`, action.cmd, "Enter"]);
+    await sendToWindow(p, action.window, action.cmd).catch((e) => die(String(e.message ?? e)));
     audit(p.name, actionName, tier, `sent-to-tmux:${action.window}`);
     console.log(`sent to tmux ${p.name}:${action.window} — watch with: tmux attach -t ${p.name}`);
     return;

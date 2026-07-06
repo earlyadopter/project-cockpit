@@ -20,9 +20,17 @@ cockpit audit                     print the audit log
 cockpit dash [port]               dashboard at http://localhost:4400 (Phase 2)
 ```
 
-## Dashboard (Phase 2)
+## Dashboard (Phase 2 + 3)
 
-`cockpit dash` starts a read-only web UI on `localhost:4400` and opens it in the browser: a project sidebar (needs-attention first) and per-project collapsible cards — Git, Workspace (tmux + ports), Deploy (date of the last push to origin's default branch — the "last PROD deploy" proxy for push-to-deploy projects), Recent commits, Changelog (auto-detected, or set `changelog:` in the repo config), and declared Actions with their tiers. Light/dark follows the system. Refreshes every 10s; every request recomputes live state — stop and restart it freely, there is nothing to lose. Strictly read-only: running actions stays in the CLI (Phase 3 decision).
+`cockpit dash` starts a web UI on `localhost:4400` and opens it in the browser: a project sidebar (needs-attention first) and per-project collapsible cards — Git, Workspace (tmux + ports), Deploy (date of the last push to origin's default branch — the "last PROD deploy" proxy for push-to-deploy projects), Recent commits, Changelog (auto-detected, or set `changelog:` in the repo config), and Actions. Light/dark follows the system. Refreshes every 10s; every request recomputes live state — stop and restart it freely, there is nothing to lose.
+
+Phase 3 additions:
+
+- **Actions run from the UI**, with the same tiers enforced *server-side*: `safe` runs on click (output shown inline, real exit code), `confirm` returns a 409 until the UI confirmation is acknowledged, `manual` is always refused (403) — the UI shows a copy button instead. Actions with `window:` are sent to the project's tmux window. Everything lands in the audit log tagged `[dash]`.
+- **Open from the UI**: Cursor / Finder / Obsidian buttons (server-side `open`), web links for GitHub / deploy / local dev.
+- **Command palette** (`⌘K`): switch project, open targets, run actions.
+- **Audit log** view (sidebar footer).
+- The server binds `127.0.0.1` only and refuses cross-origin non-GET requests.
 
 ## Install
 

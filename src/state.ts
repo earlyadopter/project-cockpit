@@ -171,6 +171,79 @@ export function readChangelog(p: Project, maxLines = 80): { path: string; text: 
   return null;
 }
 
+// ---------- actions & opening (shared by CLI and dashboard) ----------
+export async function ensureSession(p: Project): Promise<boolean> {
+  if (await tmuxSessionAlive(p.name)) return false;
+  const first = TMUX_WINDOWS[0];
+  if (!sh("tmux", ["new-session", "-d", "-s", p.name, "-c", p.root, "-n", first]).ok)
+    throw new Error(`failed to create tmux session "${p.name}"`);
+  for (const w of TMUX_WINDOWS.slice(1))
+    sh("tmux", ["new-window", "-d", "-t", `=${p.name}`, "-c", p.root, "-n", w]);
+  sh("tmux", ["select-window", "-t", `=${p.name}:${first}`]);
+  return true;
+}
+
+export const OPEN_TARGETS = ["cursor", "obsidian", "finder", "github", "deploy", "dev"] as const;
+
+export function openTarget(p: Project, target: string): { ok: boolean; result?: string; error?: string } {
+  const svcUrl = (kinds: string[]) => p.cfg.services?.find((s) => s.kind && kinds.includes(s.kind))?.url;
+  switch (target) {
+    case "cursor": {
+      const r = sh("cursor", [p.root]);
+      if (!r.ok) sh("open", ["-a", "Cursor", p.root]);
+      return { ok: true, result: p.root };
+    }
+    case "obsidian":
+      if (!p.cfg.notes) return { ok: false, error: `no notes: configured in ${p.name}/.project-cockpit.yml` };
+      sh("open", [p.cfg.notes]);
+      return { ok: true, result: p.cfg.notes };
+    case "finder":
+      sh("open", [p.root]);
+      return { ok: true, result: p.root };
+    case "github":
+      if (!p.cfg.repo) return { ok: false, error: `no repo: configured for ${p.name}` };
+      sh("open", [p.cfg.repo]);
+      return { ok: true, result: p.cfg.repo };
+    case "deploy": {
+      const url = svcUrl(["vercel", "render"]);
+      if (!url) return { ok: false, error: `no vercel/render service configured for ${p.name}` };
+      sh("open", [url]);
+      return { ok: true, result: url };
+    }
+    case "dev": {
+      const url = svcUrl(["local"]);
+      if (!url) return { ok: false, error: `no local service configured for ${p.name}` };
+      sh("open", [url]);
+      return { ok: true, result: url };
+    }
+    default:
+      return { ok: false, error: `unknown target "${target}" — one of: ${OPEN_TARGETS.join(", ")}` };
+  }
+}
+
+// Run a non-window action, capturing output (dashboard path; the CLI streams instead).
+export function runInline(p: Project, cmd: string, timeoutMs = 300_000): { status: number | null; output: string } {
+  const r = spawnSync("bash", ["-lc", cmd], {
+    cwd: p.root, encoding: "utf8", timeout: timeoutMs, maxBuffer: 4 * 1024 * 1024,
+  });
+  let output = ((r.stdout ?? "") + (r.stderr ? "\n" + r.stderr : "")).trim();
+  const lines = output.split("\n");
+  if (lines.length > 200) output = "…\n" + lines.slice(-200).join("\n");
+  if (r.error && (r.error as NodeJS.ErrnoException).code === "ETIMEDOUT") output += "\n[cockpit: timed out]";
+  return { status: r.status, output };
+}
+
+export async function sendToWindow(p: Project, window: string, cmd: string): Promise<void> {
+  await ensureSession(p);
+  sh("tmux", ["send-keys", "-t", `=${p.name}:${window}`, cmd, "Enter"]);
+}
+
+export function readAudit(maxLines = 200): string {
+  if (!existsSync(AUDIT_FILE)) return "";
+  const lines = readFileSync(AUDIT_FILE, "utf8").trimEnd().split("\n");
+  return lines.slice(-maxLines).join("\n");
+}
+
 // ---------- audit ----------
 export function audit(project: string, action: string, tier: string, result: string): void {
   mkdirSync(COCKPIT_DIR, { recursive: true });
