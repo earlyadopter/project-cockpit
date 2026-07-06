@@ -31,6 +31,7 @@ Phase 3 additions:
 - **Command palette** (`⌘K`): switch project, open targets, run actions.
 - **Audit log** view (sidebar footer).
 - **＋ Add project** (sidebar): type a path (`~` works), or one-click a discovered candidate — the server scans the parent folders of registered projects for git repos not yet in the registry.
+- The server binds `127.0.0.1` only and refuses cross-origin non-GET requests.
 
 ## Plan card (features · tickets · direction)
 
@@ -45,8 +46,9 @@ Rendering rules (the file is never reordered — checkboxes are the status): don
 
 **Hints & generated options:** the `hints…` button on a question opens a popup showing any planning docs the question references (`planning/NN` is resolved against `<root>/planning/` and one level of subproject `planning/` dirs), plus a *generate options* button — a headless `claude -p` call (context inlined, no tools, ~15-60s) returns 3-5 grounded options with tradeoffs. Click to select one or more (the popup stays open; options are cached per question), then "use selected" combines them into the answer field. You still hit decide — selecting runs nothing.
 
-**Start implementation:** after a decision is saved, the dashboard offers to start the work immediately: a new `impl` window in the project's tmux session running Claude Code, briefed with the decision and pointed at the Implementation-queue ticket. Attended, visible, interruptible — watch it with `cockpit go <project>`. Audit-logged as `plan:implement`. The foundation's docs rule tells Claude Code to keep the checkboxes current as it completes work, and the `plan.md` template ships with the base manifest. `cockpit status` shows a one-line summary.
-- The server binds `127.0.0.1` only and refuses cross-origin non-GET requests.
+**Start implementation:** after a decision is saved, the dashboard offers to start the work immediately: a new `impl` window in the project's tmux session running Claude Code, briefed with the decision and pointed at the Implementation-queue ticket. Attended, visible, interruptible — watch it with `cockpit go <project>`. Audit-logged as `plan:implement`. If you decline, nothing runs — the decision stays a queued ticket you can start any time (`cockpit go <project>`, then ask Claude in the agent tab to work the Implementation queue).
+
+The foundation's docs rule tells Claude Code to keep the checkboxes current as it completes work, and the `plan.md` template ships with the base manifest. `cockpit status` shows a one-line summary.
 
 ## Agent visibility (Phase 4)
 
