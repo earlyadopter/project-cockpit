@@ -7,7 +7,9 @@ One binary, five verbs, no daemon, no cache — every call recomputes live state
 ```
 cockpit list                      all projects, one status line each (attention first)
 cockpit status <project>          git, tmux, services, env files, actions
-cockpit go <project>              attach-or-create the project's tmux session (dev/agent/shell)
+cockpit go <project> [--cc]       attach-or-create the project's tmux session (dev/agent/shell)
+                                  --cc uses tmux control mode: iTerm2 renders the session's
+                                  windows as native macOS tabs
 cockpit open <project> <target>   cursor | obsidian | finder | github | deploy | dev
 cockpit run <project> <action>    run a declared action — tier-enforced, audit-logged
 cockpit add [path]                register a project (default: cwd)

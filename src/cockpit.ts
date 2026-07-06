@@ -272,16 +272,20 @@ async function ensureSession(p: Project): Promise<boolean> {
   return true;
 }
 
-async function cmdGo(query: string): Promise<void> {
+async function cmdGo(query: string, cc = false): Promise<void> {
   const p = findProject(query);
   const created = await ensureSession(p);
   audit(p.name, "go", "safe", created ? "session-created" : "session-existed");
   if (process.env.TMUX) {
+    // already inside tmux — just jump; -CC can't nest
     spawnSync("tmux", ["switch-client", "-t", `=${p.name}`], { stdio: "inherit" });
   } else if (process.stdin.isTTY) {
-    spawnSync("tmux", ["attach", "-t", `=${p.name}`], { stdio: "inherit" });
+    const attach = cc ? ["-CC", "attach", "-t", `=${p.name}`] : ["attach", "-t", `=${p.name}`];
+    spawnSync("tmux", attach, { stdio: "inherit" });
   } else {
-    console.log(`${created ? "created" : "running"}: tmux session "${p.name}" — attach with:\n  tmux attach -t ${p.name}`);
+    console.log(`${created ? "created" : "running"}: tmux session "${p.name}" — attach with:
+  tmux attach -t ${p.name}        # classic tmux
+  tmux -CC attach -t ${p.name}    # iTerm2 native windows/tabs`);
   }
 }
 
@@ -390,7 +394,8 @@ function help(): void {
 
   cockpit list                      all projects, one status line each
   cockpit status <project>          full picture: git, tmux, services, actions
-  cockpit go <project>              attach-or-create the project tmux session
+  cockpit go <project> [--cc]       attach-or-create the project tmux session
+                                    (--cc: iTerm2 control mode — native tabs)
   cockpit open <project> <target>   ${OPEN_TARGETS.join(" | ")}
   cockpit run <project> <action>    run a declared action (tier-enforced, audited)
   cockpit add [path]                register a project (default: cwd)
@@ -405,7 +410,12 @@ const [cmd, ...args] = process.argv.slice(2);
 switch (cmd) {
   case "list": case "ls": await cmdList(); break;
   case "status": case "st": await cmdStatus(args[0] ?? die("usage: cockpit status <project>")); break;
-  case "go": await cmdGo(args[0] ?? die("usage: cockpit go <project>")); break;
+  case "go": {
+    const cc = args.includes("--cc") || args.includes("-cc");
+    const rest = args.filter((a) => a !== "--cc" && a !== "-cc");
+    await cmdGo(rest[0] ?? die("usage: cockpit go <project> [--cc]"), cc);
+    break;
+  }
   case "open": cmdOpen(args[0] ?? die("usage: cockpit open <project> <target>"), args[1]); break;
   case "run": await cmdRun(args[0] ?? die("usage: cockpit run <project> <action>"), args[1]); break;
   case "add": cmdAdd(args[0]); break;
