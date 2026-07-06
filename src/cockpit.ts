@@ -394,8 +394,9 @@ function help(): void {
 
   cockpit list                      all projects, one status line each
   cockpit status <project>          full picture: git, tmux, services, actions
-  cockpit go <project> [--cc]       attach-or-create the project tmux session
-                                    (--cc: iTerm2 control mode — native tabs)
+  cockpit go <project>              attach-or-create the project tmux session
+                                    (native iTerm2 tabs by default in iTerm2;
+                                     --no-cc for classic tmux UI, --cc to force)
   cockpit open <project> <target>   ${OPEN_TARGETS.join(" | ")}
   cockpit run <project> <action>    run a declared action (tier-enforced, audited)
   cockpit add [path]                register a project (default: cwd)
@@ -411,9 +412,12 @@ switch (cmd) {
   case "list": case "ls": await cmdList(); break;
   case "status": case "st": await cmdStatus(args[0] ?? die("usage: cockpit status <project>")); break;
   case "go": {
-    const cc = args.includes("--cc") || args.includes("-cc");
-    const rest = args.filter((a) => a !== "--cc" && a !== "-cc");
-    await cmdGo(rest[0] ?? die("usage: cockpit go <project> [--cc]"), cc);
+    // In iTerm2, control mode (native tabs) is the default — classic tmux UI via --no-cc.
+    const forceCc = args.includes("--cc") || args.includes("-cc");
+    const noCc = args.includes("--no-cc");
+    const cc = forceCc || (!noCc && process.env.TERM_PROGRAM === "iTerm.app");
+    const rest = args.filter((a) => !["--cc", "-cc", "--no-cc"].includes(a));
+    await cmdGo(rest[0] ?? die("usage: cockpit go <project> [--cc|--no-cc]"), cc);
     break;
   }
   case "open": cmdOpen(args[0] ?? die("usage: cockpit open <project> <target>"), args[1]); break;
