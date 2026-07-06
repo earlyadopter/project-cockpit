@@ -116,7 +116,7 @@ const PAGE = `<!doctype html>
   .proj .sub { color: var(--ink-2); font-size: 12px; margin-left: 17px; }
   .dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
   .dot.ok { background: var(--ok); } .dot.warn { background: var(--warn-ink); }
-  main { flex: 1; padding: 22px 26px; max-width: 980px; }
+  main { flex: 1; padding: 22px 26px; min-width: 0; }
   header .path { color: var(--ink-3); font-size: 12px; }
   header h2 { margin: 2px 0 2px; font-size: 22px; }
   .focus { color: var(--ink-2); font-style: italic; margin: 0 0 10px; }
