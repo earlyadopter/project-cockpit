@@ -1,0 +1,14 @@
+{
+  "name": "project-cockpit",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local project cockpit CLI — Phase 1 (Design B)",
+  "type": "module",
+  "bin": { "cockpit": "bin/cockpit" },
+  "dependencies": {
+    "js-yaml": "^4.1.0"
+  },
+  "devDependencies": {
+    "@types/js-yaml": "^4.0.9"
+  }
+}

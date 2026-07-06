@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Shim so `cockpit` works from anywhere (symlink this into ~/.local/bin).
+set -euo pipefail
+SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+if [ -x "$HOME/.bun/bin/bun" ]; then BUN="$HOME/.bun/bin/bun"; else BUN="bun"; fi
+exec "$BUN" "$(dirname "$SELF")/../src/cockpit.ts" "$@"
