@@ -294,9 +294,15 @@ const PAGE = `<!doctype html>
   #palette, #addmodal, #hintmodal { position: fixed; inset: 0; background: var(--overlay); display: none; z-index: 10; }
   #palette.open, #addmodal.open, #hintmodal.open { display: block; }
   #palette .box, #addmodal .box { width: min(560px, 90vw); margin: 12vh auto 0; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; box-shadow: 0 18px 50px rgba(0,0,0,.3); }
-  #hintmodal .box { width: min(760px, 92vw); margin: 8vh auto 0; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; box-shadow: 0 18px 50px rgba(0,0,0,.3); }
-  #hintmodal pre { margin: 4px 0 8px; max-height: 220px; }
-  .optitem { border-top: 1px solid var(--border); padding: 10px 0; }
+  #hintmodal .box { width: min(1100px, 94vw); margin: 5vh auto 0; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; box-shadow: 0 18px 50px rgba(0,0,0,.3); display: flex; flex-direction: column; max-height: 88vh; }
+  #hintmodal .items { max-height: none; overflow-y: auto; flex: 1; }
+  #hintmodal pre { margin: 4px 0 8px; max-height: 48vh; }
+  .optitem { border-top: 1px solid var(--border); padding: 10px 12px; border-radius: 8px; cursor: pointer; position: relative; }
+  .optitem .tick { position: absolute; right: 12px; top: 10px; color: var(--accent); font-weight: 700; visibility: hidden; }
+  .optitem.sel { background: var(--chip-bg); outline: 2px solid var(--accent); outline-offset: -2px; }
+  .optitem.sel .tick { visibility: visible; }
+  #hintfoot { border-top: 1px solid var(--border); padding: 10px 16px; display: flex; align-items: center; gap: 12px; flex: none; }
+  #hintfoot .expl { color: var(--ink-3); font-size: 12px; line-height: 1.4; }
   #palette input, #addmodal input { width: 100%; border: 0; outline: 0; background: none; color: var(--ink); font: 16px inherit; padding: 14px 16px; border-bottom: 1px solid var(--border); }
   #palette .items, #addmodal .items { max-height: 46vh; overflow-y: auto; }
   #palette .item, #addmodal .item { padding: 9px 16px; cursor: pointer; display: flex; gap: 10px; align-items: baseline; }
@@ -340,7 +346,11 @@ const PAGE = `<!doctype html>
 <div id="hintmodal" onclick="if(event.target===this)closeHints()">
   <div class="box">
     <div style="padding:12px 16px;border-bottom:1px solid var(--border);font-weight:600" id="hinttitle"></div>
-    <div class="items" id="hintbody" style="max-height:60vh"></div>
+    <div class="items" id="hintbody"></div>
+    <div id="hintfoot">
+      <button class="runbtn" id="usebtn" onclick="useSelected()" disabled>use selected → answer field</button>
+      <span class="expl">Selecting here only fills the answer field — nothing runs. Then <strong>decide</strong> writes the decision + a ticket to plan.md, and you'll be asked whether to start implementation (a Claude Code session in this project's tmux) or leave it queued for later.</span>
+    </div>
   </div>
 </div>
 <div id="addmodal" onclick="if(event.target===this)closeAdd()">
@@ -600,16 +610,18 @@ async function submitAnswer(i) {
   const r = await fetch("/api/plan/answer", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ project: selected, question, answer }) });
   const dd = await r.json();
   if (!r.ok) { alert(dd.error || "failed"); if (btn) { btn.disabled = false; btn.textContent = "decide"; } return; }
-  if (confirm("Decision saved to plan.md.\\n\\nStart implementation now? This opens a Claude Code session in " + selected + "'s tmux workspace (new 'impl' window), briefed with this decision.")) {
+  if (confirm("Saved to plan.md: question checked with your answer, and a ticket added to '### Implementation queue'. Nothing is running yet.\\n\\nStart implementation NOW?\\n\\nOK — opens a live Claude Code session in " + selected + "'s tmux workspace (new 'impl' window), briefed with this decision. It starts working immediately; watch or steer it with: cockpit go " + selected + "\\n\\nCancel — leave it as a queued ticket. Start it later yourself: cockpit go " + selected + ", then in the agent tab ask Claude to work the Implementation queue in plan.md.")) {
     const ir = await fetch("/api/plan/implement", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ project: selected, question, answer }) });
     const id = await ir.json();
     if (!ir.ok) alert(id.error || "failed to start implementation");
-    else alert("Implementation started in tmux window \\"impl\\" — watch it with: cockpit go " + selected);
+    else alert("Implementation running in tmux window \\"impl\\" — watch it with: cockpit go " + selected + "\\nThe agent indicator on this dashboard will show it as working ✳.");
   }
   refresh();
 }
 
 // ---------- plan: hints & generated options ----------
+// options + selections are cached per question, so reopening never regenerates
+window._optCache = {};
 async function openHints(i) {
   const question = (window._openQuestions ?? [])[i];
   window._hintQ = i;
@@ -624,9 +636,15 @@ async function openHints(i) {
   body.innerHTML =
     (refs || '<div class="mut" style="padding:8px 16px">no referenced planning docs found in the question text</div>') +
     \`<div style="padding:8px 16px 14px"><button class="runbtn" id="genbtn" onclick="genOptions()">✨ generate options with Claude</button>
-     <span class="mut" style="font-size:12px"> — reads the docs above + plan.md, ~30-60s</span><div id="optlist"></div></div>\`;
+     <span class="mut" style="font-size:12px"> — reads the docs above + plan.md, ~15-60s</span><div id="optlist"></div></div>\`;
+  if (window._optCache[question]) renderOptions();
+  updateUseBtn();
 }
 function closeHints() { document.getElementById("hintmodal").classList.remove("open"); }
+function cacheEntry() {
+  const question = (window._openQuestions ?? [])[window._hintQ];
+  return window._optCache[question];
+}
 async function genOptions() {
   const btn = document.getElementById("genbtn");
   btn.disabled = true; btn.textContent = "thinking…";
@@ -637,20 +655,43 @@ async function genOptions() {
   const list = document.getElementById("optlist");
   if (!r.ok) { list.innerHTML = \`<div class="bad-t" style="padding:8px 0">\${esc(d.error || "failed")}</div>\`; return; }
   if (d.options) {
-    list.innerHTML = '<div class="mut" style="padding:10px 0 4px;font-size:12px">click an option to prefill the answer — you still hit decide:</div>' +
-      d.options.map((o, oi) => \`<div class="item optitem" data-oi="\${oi}"><span><strong>\${esc(o.label)}</strong>\${o.detail ? \`<br><span class="mut">\${esc(o.detail)}</span>\` : ""}</span></div>\`).join("");
-    window._genOptions = d.options;
-    list.querySelectorAll(".optitem").forEach((el) => {
-      el.onclick = () => {
-        const o = window._genOptions[Number(el.dataset.oi)];
-        const input = document.getElementById("ansin-" + window._hintQ);
-        if (input) { input.value = o.label; input.focus(); }
-        closeHints();
-      };
-    });
+    window._optCache[question] = { options: d.options, sel: new Set() };
+    renderOptions();
   } else {
     list.innerHTML = \`<pre>\${esc(d.raw || "")}</pre>\`;
   }
+}
+function renderOptions() {
+  const entry = cacheEntry();
+  const list = document.getElementById("optlist");
+  if (!entry || !list) return;
+  list.innerHTML = '<div class="mut" style="padding:10px 0 4px;font-size:12px">click to select one or more — selections combine into the answer field:</div>' +
+    entry.options.map((o, oi) => \`<div class="optitem \${entry.sel.has(oi) ? "sel" : ""}" data-oi="\${oi}">
+      <span class="tick">✓</span><strong>\${esc(o.label)}</strong>\${o.detail ? \`<br><span class="mut">\${esc(o.detail)}</span>\` : ""}</div>\`).join("");
+  list.querySelectorAll(".optitem").forEach((el) => {
+    el.onclick = () => {
+      const oi = Number(el.dataset.oi);
+      entry.sel.has(oi) ? entry.sel.delete(oi) : entry.sel.add(oi);
+      renderOptions();
+    };
+  });
+  updateUseBtn();
+}
+function updateUseBtn() {
+  const btn = document.getElementById("usebtn");
+  const entry = cacheEntry();
+  const n = entry ? entry.sel.size : 0;
+  btn.disabled = n === 0;
+  btn.textContent = n ? \`use \${n} selected → answer field\` : "use selected → answer field";
+}
+function useSelected() {
+  const entry = cacheEntry();
+  if (!entry || !entry.sel.size) return;
+  const text = [...entry.sel].sort().map((oi) => entry.options[oi].label).join("; ");
+  const input = document.getElementById("ansin-" + window._hintQ);
+  if (input) { input.value = text; }
+  closeHints();
+  input?.focus();
 }
 
 // ---------- add project ----------
