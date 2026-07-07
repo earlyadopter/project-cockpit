@@ -529,6 +529,10 @@ export async function startAgentTask(p: Project, brief: string, window = "impl")
   await ensureSession(p);
   const wid = sh("tmux", ["new-window", "-d", "-P", "-F", "#{window_id}", "-t", `=${p.name}`, "-c", p.root, "-n", window]).out;
   if (!wid) return { ok: false, error: "could not create tmux window" };
+  // Detached-created windows are born 80x24; in iTerm2 control mode that
+  // mismatch causes a native-window resize tug-of-war ("jumping") while the
+  // TUI redraws. Adopt the attached client's size before anything renders.
+  sh("tmux", ["resize-window", "-A", "-t", wid]);
   sh("tmux", ["send-keys", "-l", "-t", wid, `claude "${brief}"`]);
   sh("tmux", ["send-keys", "-t", wid, "Enter"]);
   return { ok: true };
