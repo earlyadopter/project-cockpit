@@ -12,7 +12,7 @@ import { resolve } from "node:path";
 import { statSync } from "node:fs";
 import {
   type Project,
-  agentState, allProjects, answerDirection, attentionItems, audit, claudeCwds,
+  agentState, allProjects, answerDirection, attentionItems, audit, claudeCwds, cleanForPrompt,
   createConfigFromTemplate, discoverCandidates, findPlanningRefs, generateOptions,
   gitState, humanAge, lastPush, loadProject, loadRegistry, localService, openTarget,
   planStats, portListening, readAudit, readChangelog, readPlan, recentCommits,
@@ -200,6 +200,23 @@ export function startServer(port = 4400) {
         return json({ ok: true });
       }
 
+      if (req.method === "POST" && url.pathname === "/api/plan/work") {
+        const body = await req.json().catch(() => ({}));
+        const p = getProject(String(body.project ?? ""));
+        if (!p) return json({ error: "unknown project" }, 404);
+        const feature = String(body.feature ?? "").trim();
+        const ticket = String(body.ticket ?? "").trim();
+        const plan = readPlan(p);
+        const f = plan?.features.find((x) => x.name === feature);
+        const t = f?.tickets.find((x) => x.text === ticket && !x.done);
+        if (!t) return json({ error: "ticket not found or already done (plan.md changed?)" }, 404);
+        const brief = `In plan.md, under the feature '${cleanForPrompt(feature)}', there is an open ticket: '${cleanForPrompt(ticket)}'. Read plan.md and the relevant code for context, briefly state your plan, then implement this ticket. Check its box in plan.md when done, and add follow-up tickets you discover. Do NOT push.`;
+        const r = await startAgentTask(p, brief, "impl");
+        if (!r.ok) return json({ error: r.error }, 500);
+        audit(p.name, "plan:work", "confirm", `${ticket.slice(0, 70)} [dash]`);
+        return json({ ok: true });
+      }
+
       if (req.method === "POST" && url.pathname === "/api/plan/implement") {
         const body = await req.json().catch(() => ({}));
         const p = getProject(String(body.project ?? ""));
@@ -314,6 +331,14 @@ const PAGE = `<!doctype html>
   .fixcmd code { background: var(--chip-bg); border: 1px solid var(--border); border-radius: 6px; padding: 5px 10px; flex: 1; overflow-x: auto; white-space: nowrap; }
   .calm { color: var(--ok); font-size: 13px; margin: 14px 0; }
   .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(420px, 1fr)); gap: 14px; margin-top: 10px; }
+  .cards.small { grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+  .cards.small details { font-size: 12.5px; }
+  .cards.small summary { padding: 8px 12px; font-size: 13px; }
+  .cards.small .body { padding: 0 12px 10px; }
+  .cards.small pre { max-height: 170px; font-size: 11px; }
+  .cards.small .commit { font-size: 12px; }
+  .tkbtn { cursor: pointer; font-family: inherit; text-align: left; }
+  .tkbtn:hover { border-color: var(--accent); color: var(--accent); }
   details.card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 0; overflow: hidden; }
   details.wide { grid-column: 1 / -1; }
   summary { cursor: pointer; padding: 11px 14px; font-weight: 600; list-style: none; display: flex; align-items: center; gap: 8px; user-select: none; }
@@ -560,6 +585,7 @@ async function renderDetail() {
     planHint = \`\${d.plan.path} · \${s.ticketsDone}/\${s.ticketsTotal} tickets\${s.openQuestions ? \` · \${s.openQuestions} open question\${s.openQuestions > 1 ? "s" : ""}\` : ""}\`;
     const dirSorted = [...d.plan.direction].sort((a, b) => (a.done ? 1 : 0) - (b.done ? 1 : 0));
     window._openQuestions = dirSorted.filter((q) => !q.done).map((q) => q.text);
+    window._planTickets = [];
     let qi = -1;
     const dirHtml = dirSorted.length
       ? \`<div class="plansec">Direction</div>\` + dirSorted.map((q) => {
@@ -579,7 +605,11 @@ async function renderDetail() {
           const done = f.tickets.filter((t) => t.done).length, total = f.tickets.length;
           const fd = featureDone(f);
           const tickets = [...f.tickets].sort((a, b) => (a.done ? 1 : 0) - (b.done ? 1 : 0))
-            .map((t) => t.done ? \`<span class="tk done"><s>\${esc(t.text)}</s></span>\` : \`<span class="tk">\${esc(t.text)}</span>\`).join("");
+            .map((t) => {
+              if (t.done) return \`<span class="tk done"><s>\${esc(t.text)}</s></span>\`;
+              const wi = window._planTickets.push({ feature: f.name, text: t.text }) - 1;
+              return \`<button class="tk tkbtn" title="start implementing this ticket" onclick="workTicket(\${wi})">▸ \${esc(t.text)}</button>\`;
+            }).join("");
           return \`<div class="feat \${fd ? "done" : ""}">
             <div class="fhead">\${fd ? \`<s>\${esc(f.name)}</s>\` : esc(f.name)}
               <span class="fprog"><span class="fbar"><span style="width:\${total ? Math.round((done / total) * 100) : 0}%"></span></span> \${done}/\${total}</span></div>
@@ -604,11 +634,15 @@ async function renderDetail() {
     </header>
     \${attn}
     <div class="cards">
+      \${card("plan", "Plan", planHint, planBody, true)}
+    </div>
+    <div class="cards small">
       \${card("git", "Git", d.branch, gitBody)}
       \${card("ws", "Workspace", d.session ? "tmux ✓" : "", wsBody)}
       \${card("deploy", "Deploy", d.lastPush ? d.lastPush.age : "", deployBody)}
       \${card("commits", "Recent commits", "", commitsBody)}
-      \${card("plan", "Plan", planHint, planBody, true)}
+    </div>
+    <div class="cards">
       \${card("changelog", "Changelog", d.changelog ? d.changelog.path : "", clBody, true)}
       \${card("actions", "Actions", "", actionsBody, true)}
     </div>
@@ -752,6 +786,18 @@ async function fixCommitAgent() {
   const d = await r.json();
   if (!r.ok) { setFixOut("✗ " + (d.error || "failed"), ""); return; }
   setFixOut("✓ session started in tmux window \\"commit\\"", "Watch it with: cockpit go " + selected + "\\nIt may ask for permission approvals there.");
+}
+
+// ---------- plan: work a ticket ----------
+async function workTicket(i) {
+  const t = (window._planTickets ?? [])[i];
+  if (!t) return;
+  if (!confirm("Start implementing this ticket?\\n\\n  " + t.text + "\\n  (feature: " + t.feature + ")\\n\\nOpens an attended Claude Code session in " + selected + "'s tmux 'impl' window, briefed with this ticket. It will check the box in plan.md when done. It will not push.")) return;
+  const r = await fetch("/api/plan/work", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ project: selected, feature: t.feature, ticket: t.text }) });
+  const d = await r.json();
+  if (!r.ok) { alert(d.error || "failed"); return; }
+  alert("Working on it — tmux window \\"impl\\" in " + selected + ". The agent indicator will show ✳ while it works; watch with: cockpit go " + selected);
+  refresh();
 }
 
 // ---------- plan: hints & generated options ----------

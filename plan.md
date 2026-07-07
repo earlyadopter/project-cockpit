@@ -8,6 +8,12 @@
 
 ## Features
 
+### Plan as command center
+
+- [x] Plan card moved to the top; Git/Workspace/Deploy/Commits compacted below
+- [x] every open ticket is a "work on this" button: confirm -> briefed Claude session in tmux impl window
+- [x] server validates the ticket still exists and is open before launching; audit-logged as plan:work
+
 ### Actionable attention chips
 
 - [x] chips are buttons: popup per chip explaining the situation
