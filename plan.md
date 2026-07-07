@@ -14,6 +14,8 @@
 - [x] auto-fixes: pull --ff-only (confirm), create .project-cockpit.yml from template
 - [x] agent-fix: "have Claude review & commit" — attended session in tmux commit window, never pushes
 - [x] manual-by-design (push, upstream) get copyable commands + why-not-automated explanation
+- [x] uncommitted popup shows the actual dirty files; submodules detected and explained (parent commit can't include them)
+- [x] freshness indicator in footer ("updated Ns ago", turns yellow when stale) + refresh-now button
 
 ### Open-sourcing polish
 

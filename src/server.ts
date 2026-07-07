@@ -16,7 +16,7 @@ import {
   createConfigFromTemplate, discoverCandidates, findPlanningRefs, generateOptions,
   gitState, humanAge, lastPush, loadProject, loadRegistry, localService, openTarget,
   planStats, portListening, readAudit, readChangelog, readPlan, recentCommits,
-  runInline, saveRegistry, sendToWindow, startAgentTask, startImplementation,
+  runInline, saveRegistry, sendToWindow, shA, startAgentTask, startImplementation,
   tmuxSessionAlive, tmuxWindows,
 } from "./state.ts";
 
@@ -55,12 +55,22 @@ async function projectDetail(p: Project) {
     })),
   );
   const changelog = readChangelog(p);
+  // Dirty paths that are submodules (gitlinks): a parent-repo commit cannot
+  // include their inner changes — the UI must say so.
+  const gitlinks = new Set(
+    (await shA("git", ["-C", p.root, "ls-files", "-s"])).out.split("\n")
+      .filter((l) => l.startsWith("160000")).map((l) => l.split("\t")[1]),
+  );
+  const dirtyPath = (l: string) => l.trim().replace(/^\S{1,2}\s+/, "");
+  const submodulesDirty = git.dirty
+    .map(dirtyPath)
+    .filter((path) => gitlinks.has(path));
   return {
     ...summary,
     repo: p.cfg.repo ?? "", notes: p.cfg.notes ?? "", hasConfig: p.hasConfig,
     lastCommit: git.lastCommit, lastCommitAge: git.lastCommitAge,
     hasUpstream: git.hasUpstream, hasRemote: git.hasRemote,
-    dirtyFiles: git.dirty.slice(0, 20), dirtyTotal: git.dirty.length,
+    dirtyFiles: git.dirty.slice(0, 20), dirtyTotal: git.dirty.length, submodulesDirty,
     windows, lastPush: push, commits, services,
     envFiles: (p.cfg.env_files ?? []).map((f) => ({ path: f, exists: existsSync(join(p.root, f)) })),
     actions: Object.entries(p.cfg.actions ?? {}).map(([name, a]) => ({
@@ -405,6 +415,7 @@ const PAGE = `<!doctype html>
 </div>
 <script>
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;" }[c]));
+const dirtyPath = (l) => l.trim().replace(/^\\S{1,2}\\s+/, "");
 let selected = decodeURIComponent(location.hash.slice(1)) || null;
 let openState = {};
 let projectsCache = [];
@@ -509,7 +520,7 @@ async function renderDetail() {
   const gitBody = d.branch ? \`<table>
       <tr><td class="k">branch</td><td class="mono">\${esc(d.branch)}\${d.hasUpstream ? \` <span class="mut">↑\${d.ahead} ↓\${d.behind}</span>\` : \` <span class="mut">(\${d.hasRemote ? "no upstream" : "no remote"})</span>\`}</td></tr>
       <tr><td class="k">last commit</td><td>\${esc(d.lastCommit)} <span class="mut">(\${esc(d.lastCommitAge)})</span></td></tr>
-      \${d.dirtyTotal ? \`<tr><td class="k">dirty (\${d.dirtyTotal})</td><td><pre>\${esc(d.dirtyFiles.join("\\n"))}\${d.dirtyTotal > 20 ? "\\n…" : ""}</pre></td></tr>\` : \`<tr><td class="k">worktree</td><td class="ok-t">clean ✓</td></tr>\`}
+      \${d.dirtyTotal ? \`<tr><td class="k">dirty (\${d.dirtyTotal})</td><td><pre>\${esc(d.dirtyFiles.map((l) => (d.submodulesDirty ?? []).includes(dirtyPath(l)) ? l + "   ← submodule (commit inside it)" : l).join("\\n"))}\${d.dirtyTotal > 20 ? "\\n…" : ""}</pre></td></tr>\` : \`<tr><td class="k">worktree</td><td class="ok-t">clean ✓</td></tr>\`}
     </table>\` : '<span class="mut">not a git repository</span>';
 
   const agentHtml = d.agent.state === "working" ? \`<span class="ok-t">working ✳</span> <span class="mut">— \${esc(d.agent.detail)}, \${esc(d.agent.age)}</span>\`
@@ -601,7 +612,7 @@ async function renderDetail() {
       \${card("changelog", "Changelog", d.changelog ? d.changelog.path : "", clBody, true)}
       \${card("actions", "Actions", "", actionsBody, true)}
     </div>
-    <footer>refreshes every 10s · state recomputed live from git/tmux/lsof · <kbd>⌘K</kbd> palette</footer>\`;
+    <footer><span id="freshness">updated just now</span> · <button class="runbtn" style="font-size:11px;padding:1px 9px" onclick="refresh()">↻ refresh now</button> · state recomputed live from git/tmux/lsof · <kbd>⌘K</kbd> palette</footer>\`;
   if (auditShown) { auditShown = false; toggleAudit(); }
 }
 
@@ -680,10 +691,17 @@ function openFix(i) {
       <p><strong>Go to it:</strong></p>\${fixCmdHtml("cockpit go " + d.name)}
       <p class="mut">Then check the <b>agent</b> (or <b>impl</b>/<b>commit</b>) tab. Resume a closed conversation with <code>claude --continue</code>.</p>\`;
   } else if (/uncommitted$/.test(item)) {
-    html = \`<p>Uncommitted work is invisible to backups and to other machines, and it rots. Two ways out:</p>
-      <p><button class="runbtn" onclick="fixCommitAgent()">🤖 have Claude review &amp; commit</button>
-      <span class="mut">— opens an attended session in a tmux <b>commit</b> window; it groups changes into sensible commits with clear messages. It will not push.</span></p>
-      <p><strong>Or do it yourself:</strong></p>\${fixCmdHtml("cd " + d.root)}\${fixCmdHtml("git add -A && git commit")}
+    const subs = d.submodulesDirty ?? [];
+    const plain = (d.dirtyFiles ?? []).filter((l) => !subs.includes(dirtyPath(l)));
+    const subNote = subs.length
+      ? \`<p><strong>⚠ \${subs.length === 1 ? "This is a submodule" : "Submodules"}:</strong> <code>\${subs.map(esc).join("</code>, <code>")}</code> — its changes live in its <em>own</em> repo. A commit here cannot include them: commit <em>inside</em> the submodule first, then commit the updated pointer here.</p>\${fixCmdHtml("cd " + d.root + "/" + subs[0])}\`
+      : "";
+    html = \`<p>What's uncommitted right now (\${d.dirtyTotal}):</p>
+      <pre>\${esc((d.dirtyFiles ?? []).join("\\n"))}\${d.dirtyTotal > (d.dirtyFiles ?? []).length ? "\\n…" : ""}</pre>
+      \${subNote}
+      \${plain.length ? \`<p><button class="runbtn" onclick="fixCommitAgent()">🤖 have Claude review &amp; commit</button>
+      <span class="mut">— attended session in a tmux <b>commit</b> window; groups changes into sensible commits. It will not push.</span></p>
+      <p><strong>Or do it yourself:</strong></p>\${fixCmdHtml("cd " + d.root)}\${fixCmdHtml("git add -A && git commit")}\` : ""}
       <div id="fixout"></div>\`;
   } else if (/unpushed$/.test(item)) {
     html = \`<p>Local commits GitHub doesn't have. Pushing is <b>manual by design</b> in your safety model (and for some projects push = deploy) — the cockpit won't do it for you.</p>
@@ -833,6 +851,17 @@ async function submitAdd(path) {
   openState = {};
   refresh();
 }
+
+let lastRefreshAt = Date.now();
+const _origRefresh = refresh;
+refresh = async function () { await _origRefresh(); lastRefreshAt = Date.now(); };
+setInterval(() => {
+  const el = document.getElementById("freshness");
+  if (!el) return;
+  const s = Math.round((Date.now() - lastRefreshAt) / 1000);
+  el.textContent = s <= 2 ? "updated just now" : \`updated \${s}s ago\`;
+  if (s > 25) el.style.color = "var(--warn-ink)"; else el.style.color = "";
+}, 1000);
 
 refresh();
 setInterval(refresh, 10000);
