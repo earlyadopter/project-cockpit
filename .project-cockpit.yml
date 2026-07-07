@@ -1,0 +1,10 @@
+name: cockpit
+focus: "Extracted to own repo 2026-07-07 — next: open-sourcing polish, then remote access (Tailscale + auth)"
+repo: ""  # create GitHub repo when open-sourcing
+services:
+  - { name: Dashboard, kind: local, url: "http://localhost:4400", port: 4400 }
+env_files: []
+actions:
+  dash:    { cmd: "bun src/server.ts 4400", tier: safe, window: dev }
+  install: { cmd: "bun install", tier: safe }
+  push:    { cmd: "git push", tier: confirm }
