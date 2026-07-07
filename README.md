@@ -20,6 +20,18 @@ cockpit audit                     print the audit log
 cockpit dash [port]               dashboard at http://localhost:4400 (Phase 2)
 ```
 
+## The mental model, in plain words
+
+**What `<project>` means in commands:** the project's cockpit *name* — the first column of `cockpit list`. It was fixed when the project was registered: the `name:` from its `.project-cockpit.yml`, or the folder name if there is no config (so a folder `_WSET3_` can be named `wset3`). It is **not** your current directory — `cockpit go wset3` works from anywhere and always lands in wset3. A unique prefix is enough: `cockpit go modern`.
+
+**What the three tabs are:** three empty, labeled command lines, all opened in the project folder — a desk with three labeled drawers, not three robots. Nothing runs in them by itself, and Claude cannot see or use the other tabs; it lives entirely in the tab where you started it.
+
+- **dev** — you start the server here (`npm run dev`, or `cockpit run <p> dev` types it in for you)
+- **agent** — you run `claude` (or `claude --continue` to resume a conversation) and talk to it
+- **shell** — your drawer: `git push`, one-off commands
+
+The tabs organize; they don't automate. The two exceptions where the *cockpit* does the typing: actions declared with `window:` are sent into their tmux tab, and the dashboard's "start implementation" opens a fourth `impl` tab with Claude already running. The payoff is uniformity: same three drawers in every project, and closing the window throws away nothing.
+
 ## Dashboard (Phase 2 + 3)
 
 `cockpit dash` starts a web UI on `localhost:4400` and opens it in the browser: a project sidebar (needs-attention first) and per-project collapsible cards — Git, Workspace (tmux + ports), Deploy (date of the last push to origin's default branch — the "last PROD deploy" proxy for push-to-deploy projects), Recent commits, Changelog (auto-detected, or set `changelog:` in the repo config), and Actions. Light/dark follows the system. Refreshes every 10s; every request recomputes live state — stop and restart it freely, there is nothing to lose.
