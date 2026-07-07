@@ -1,6 +1,6 @@
-# cockpit — Phase 1 CLI
+# cockpit
 
-The weekend-build tier (Design B) of the project cockpit. Spec: [planning/cockpit-design.md](../planning/cockpit-design.md) §4 §8; tracking: [issue #10](https://github.com/earlyadopter/ai-foundation/issues/10).
+A local project cockpit: one CLI + dashboard for working on many AI-assisted projects at once — live status, named recoverable workspaces, tiered safe actions, agent visibility, and a per-project plan. Founding brief: [planning/project-cockpit.md](planning/project-cockpit.md).
 
 One binary, five verbs, no daemon, no cache — every call recomputes live state from `git`, `tmux`, and `lsof`.
 
