@@ -12,10 +12,11 @@ import { resolve } from "node:path";
 import { statSync } from "node:fs";
 import {
   type Project,
-  agentState, allProjects, answerDirection, attentionItems, audit, claudeCwds, discoverCandidates,
-  findPlanningRefs, generateOptions, gitState, humanAge, lastPush, loadProject, loadRegistry,
-  localService, openTarget, planStats, portListening, readAudit, readChangelog, readPlan,
-  recentCommits, runInline, saveRegistry, sendToWindow, startImplementation,
+  agentState, allProjects, answerDirection, attentionItems, audit, claudeCwds,
+  createConfigFromTemplate, discoverCandidates, findPlanningRefs, generateOptions,
+  gitState, humanAge, lastPush, loadProject, loadRegistry, localService, openTarget,
+  planStats, portListening, readAudit, readChangelog, readPlan, recentCommits,
+  runInline, saveRegistry, sendToWindow, startAgentTask, startImplementation,
   tmuxSessionAlive, tmuxWindows,
 } from "./state.ts";
 
@@ -158,6 +159,37 @@ export function startServer(port = 4400) {
         return json(r);
       }
 
+      // --- one-click fixes for attention chips ---
+      if (req.method === "POST" && url.pathname === "/api/fix/pull") {
+        const body = await req.json().catch(() => ({}));
+        const p = getProject(String(body.project ?? ""));
+        if (!p) return json({ error: "unknown project" }, 404);
+        const r = runInline(p, "git pull --ff-only");
+        audit(p.name, "fix:pull", "confirm", `exit=${r.status} [dash]`);
+        return json({ ok: r.status === 0, status: r.status, output: r.output });
+      }
+
+      if (req.method === "POST" && url.pathname === "/api/fix/config") {
+        const body = await req.json().catch(() => ({}));
+        const p = getProject(String(body.project ?? ""));
+        if (!p) return json({ error: "unknown project" }, 404);
+        const r = createConfigFromTemplate(p);
+        if (!r.ok) return json({ error: r.error }, 400);
+        audit(p.name, "fix:config", "safe", ".project-cockpit.yml created [dash]");
+        return json({ ok: true });
+      }
+
+      if (req.method === "POST" && url.pathname === "/api/fix/commit-agent") {
+        const body = await req.json().catch(() => ({}));
+        const p = getProject(String(body.project ?? ""));
+        if (!p) return json({ error: "unknown project" }, 404);
+        const brief = "This repo has uncommitted changes. Run git status and git diff, group the changes into one or more sensible commits with clear messages, and commit them. Ignore generated artifacts (add to .gitignore if obviously generated). Do NOT push.";
+        const r = await startAgentTask(p, brief, "commit");
+        if (!r.ok) return json({ error: r.error }, 500);
+        audit(p.name, "fix:commit-agent", "confirm", "claude session in tmux:commit [dash]");
+        return json({ ok: true });
+      }
+
       if (req.method === "POST" && url.pathname === "/api/plan/implement") {
         const body = await req.json().catch(() => ({}));
         const p = getProject(String(body.project ?? ""));
@@ -265,7 +297,11 @@ const PAGE = `<!doctype html>
   .links a, .links button { text-decoration: none; color: var(--accent); background: var(--chip-bg); border: 1px solid var(--border); padding: 4px 11px; border-radius: 999px; font-size: 13px; cursor: pointer; font-family: inherit; }
   .links a:hover, .links button:hover { border-color: var(--accent); }
   .attn { display: flex; flex-wrap: wrap; gap: 8px; margin: 14px 0; }
-  .attn span { background: var(--warn-bg); color: var(--warn-ink); border: 1px solid var(--warn-border); padding: 3px 10px; border-radius: 6px; font-size: 13px; font-weight: 500; }
+  .attnbtn { background: var(--warn-bg); color: var(--warn-ink); border: 1px solid var(--warn-border); padding: 3px 10px; border-radius: 6px; font-size: 13px; font-weight: 500; font-family: inherit; cursor: pointer; }
+  .attnbtn:hover { border-color: var(--warn-ink); }
+  .attnbtn .chev { margin-left: 6px; opacity: .6; }
+  .fixcmd { display: flex; gap: 8px; align-items: center; margin: 8px 0; }
+  .fixcmd code { background: var(--chip-bg); border: 1px solid var(--border); border-radius: 6px; padding: 5px 10px; flex: 1; overflow-x: auto; white-space: nowrap; }
   .calm { color: var(--ok); font-size: 13px; margin: 14px 0; }
   .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(420px, 1fr)); gap: 14px; margin-top: 10px; }
   details.card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 0; overflow: hidden; }
@@ -291,8 +327,9 @@ const PAGE = `<!doctype html>
   .runbtn:hover { border-color: var(--accent); color: var(--accent); }
   .runbtn:disabled { opacity: .5; cursor: wait; }
   kbd { font: 11px ui-monospace, Menlo, monospace; background: var(--chip-bg); border: 1px solid var(--border); border-bottom-width: 2px; border-radius: 4px; padding: 0 5px; }
-  #palette, #addmodal, #hintmodal { position: fixed; inset: 0; background: var(--overlay); display: none; z-index: 10; }
-  #palette.open, #addmodal.open, #hintmodal.open { display: block; }
+  #palette, #addmodal, #hintmodal, #fixmodal { position: fixed; inset: 0; background: var(--overlay); display: none; z-index: 10; }
+  #palette.open, #addmodal.open, #hintmodal.open, #fixmodal.open { display: block; }
+  #fixmodal .box { margin: 12vh auto 0; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; box-shadow: 0 18px 50px rgba(0,0,0,.3); max-height: 76vh; display: flex; flex-direction: column; }
   #palette .box, #addmodal .box { width: min(560px, 90vw); margin: 12vh auto 0; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; box-shadow: 0 18px 50px rgba(0,0,0,.3); }
   #hintmodal .box { width: min(1100px, 94vw); margin: 5vh auto 0; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; box-shadow: 0 18px 50px rgba(0,0,0,.3); display: flex; flex-direction: column; max-height: 88vh; }
   #hintmodal .items { max-height: none; overflow-y: auto; flex: 1; }
@@ -341,6 +378,12 @@ const PAGE = `<!doctype html>
   <div class="box">
     <input id="palq" placeholder="Switch project, open, or run an action…" autocomplete="off">
     <div class="items" id="palitems"></div>
+  </div>
+</div>
+<div id="fixmodal" onclick="if(event.target===this)closeFix()">
+  <div class="box" style="width:min(640px,92vw)">
+    <div style="padding:12px 16px;border-bottom:1px solid var(--border);font-weight:600" id="fixtitle"></div>
+    <div id="fixbody" style="padding:14px 16px;overflow-y:auto"></div>
   </div>
 </div>
 <div id="hintmodal" onclick="if(event.target===this)closeHints()">
@@ -440,6 +483,7 @@ async function renderDetail() {
   const ae = document.activeElement;
   if (ae && ae.tagName === "INPUT" && ae.id.startsWith("ansin-") ) return;
   if (document.getElementById("hintmodal")?.classList.contains("open")) return;
+  if (document.getElementById("fixmodal")?.classList.contains("open")) return;
   const anyAnswer = [...document.querySelectorAll('input[id^="ansin-"]')].some((el) => el.value.trim());
   if (anyAnswer) return;
   const r = await fetch("/api/project/" + encodeURIComponent(selected));
@@ -459,7 +503,7 @@ async function renderDetail() {
   ].filter(Boolean).join("");
 
   const attn = d.attention.length
-    ? \`<div class="attn">\${d.attention.map((a) => \`<span>▲ \${esc(a)}</span>\`).join("")}</div>\`
+    ? \`<div class="attn">\${d.attention.map((a, ai) => \`<button class="attnbtn" onclick="openFix(\${ai})">▲ \${esc(a)}<span class="chev">›</span></button>\`).join("")}</div>\`
     : \`<div class="calm">✓ nothing needs attention</div>\`;
 
   const gitBody = d.branch ? \`<table>
@@ -617,6 +661,79 @@ async function submitAnswer(i) {
     else alert("Implementation running in tmux window \\"impl\\" — watch it with: cockpit go " + selected + "\\nThe agent indicator on this dashboard will show it as working ✳.");
   }
   refresh();
+}
+
+// ---------- attention chips: explain / fix ----------
+function fixCmdHtml(cmd) {
+  return \`<div class="fixcmd"><code>\${esc(cmd)}</code><button class="runbtn" onclick="copyCmd(\${JSON.stringify(cmd).replace(/"/g, "&quot;")}, this)">copy</button></div>\`;
+}
+function openFix(i) {
+  const item = detailCache?.attention?.[i];
+  if (!item) return;
+  const d = detailCache;
+  const title = document.getElementById("fixtitle");
+  const body = document.getElementById("fixbody");
+  title.textContent = "▲ " + item;
+  let html = "";
+  if (/^agent waiting/.test(item)) {
+    html = \`<p>A Claude Code session in this project finished its turn — or is stalled at a permission prompt. This one is genuinely yours: it needs your reply, so there is nothing safe to automate.</p>
+      <p><strong>Go to it:</strong></p>\${fixCmdHtml("cockpit go " + d.name)}
+      <p class="mut">Then check the <b>agent</b> (or <b>impl</b>/<b>commit</b>) tab. Resume a closed conversation with <code>claude --continue</code>.</p>\`;
+  } else if (/uncommitted$/.test(item)) {
+    html = \`<p>Uncommitted work is invisible to backups and to other machines, and it rots. Two ways out:</p>
+      <p><button class="runbtn" onclick="fixCommitAgent()">🤖 have Claude review &amp; commit</button>
+      <span class="mut">— opens an attended session in a tmux <b>commit</b> window; it groups changes into sensible commits with clear messages. It will not push.</span></p>
+      <p><strong>Or do it yourself:</strong></p>\${fixCmdHtml("cd " + d.root)}\${fixCmdHtml("git add -A && git commit")}
+      <div id="fixout"></div>\`;
+  } else if (/unpushed$/.test(item)) {
+    html = \`<p>Local commits GitHub doesn't have. Pushing is <b>manual by design</b> in your safety model (and for some projects push = deploy) — the cockpit won't do it for you.</p>
+      \${fixCmdHtml("git -C " + d.root + " push")}\`;
+  } else if (/behind remote$/.test(item)) {
+    html = \`<p>The remote has commits your local copy doesn't. A fast-forward pull is safe: it only applies when your local branch has no divergent commits — otherwise it refuses and changes nothing.</p>
+      <p><button class="runbtn" onclick="fixPull()">⬇ pull --ff-only now</button></p><div id="fixout"></div>
+      <p class="mut">If it refuses (diverged history), that needs a human decision — merge or rebase in the project's shell tab.</p>\`;
+  } else if (/^no upstream/.test(item)) {
+    html = \`<p>The current branch isn't linked to a remote branch, so ahead/behind can't be tracked. Linking it does a push, which stays manual:</p>
+      \${fixCmdHtml("git -C " + d.root + " push -u origin " + (d.branch || "main"))}\`;
+  } else if (/open questions?$/.test(item)) {
+    html = \`<p>Unanswered Direction questions are the decisions quietly keeping this project in limbo. Each has <b>hints…</b> (context + generated options) and an answer field.</p>
+      <p><button class="runbtn" onclick="closeFix(); const el = document.getElementById('plan'); el.open = true; el.scrollIntoView({behavior:'smooth'})">take me to the questions</button></p>\`;
+  } else if (/no \\.project-cockpit\\.yml/.test(item)) {
+    html = \`<p>Without a config the cockpit only sees git and tmux — no services, ports, actions, or focus line.</p>
+      <p><button class="runbtn" onclick="fixConfig()">＋ create .project-cockpit.yml from template</button></p><div id="fixout"></div>
+      <p class="mut">Then edit it (Cursor button above) to add your dev command, ports, and links.</p>\`;
+  } else {
+    html = \`<p class="mut">No playbook for this one yet.</p>\`;
+  }
+  body.innerHTML = html;
+  document.getElementById("fixmodal").classList.add("open");
+}
+function closeFix() { document.getElementById("fixmodal").classList.remove("open"); }
+function setFixOut(headline, text) {
+  const el = document.getElementById("fixout");
+  if (el) el.innerHTML = \`<p><strong>\${esc(headline)}</strong></p>\${text ? \`<pre>\${esc(text)}</pre>\` : ""}\`;
+}
+async function fixPull() {
+  if (!confirm("Run git pull --ff-only in " + selected + "?")) return;
+  setFixOut("pulling…", "");
+  const r = await fetch("/api/fix/pull", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ project: selected }) });
+  const d = await r.json();
+  setFixOut(d.ok ? "✓ pulled" : "✗ exit " + d.status, d.output || d.error || "");
+  refresh();
+}
+async function fixConfig() {
+  const r = await fetch("/api/fix/config", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ project: selected }) });
+  const d = await r.json();
+  if (!r.ok) { setFixOut("✗ " + (d.error || "failed"), ""); return; }
+  closeFix();
+  refresh();
+}
+async function fixCommitAgent() {
+  if (!confirm("Open a Claude Code session in " + selected + "'s tmux (new 'commit' window) to review and commit the changes? It will not push.")) return;
+  const r = await fetch("/api/fix/commit-agent", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ project: selected }) });
+  const d = await r.json();
+  if (!r.ok) { setFixOut("✗ " + (d.error || "failed"), ""); return; }
+  setFixOut("✓ session started in tmux window \\"commit\\"", "Watch it with: cockpit go " + selected + "\\nIt may ask for permission approvals there.");
 }
 
 // ---------- plan: hints & generated options ----------

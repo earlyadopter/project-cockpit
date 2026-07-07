@@ -8,6 +8,13 @@
 
 ## Features
 
+### Actionable attention chips
+
+- [x] chips are buttons: popup per chip explaining the situation
+- [x] auto-fixes: pull --ff-only (confirm), create .project-cockpit.yml from template
+- [x] agent-fix: "have Claude review & commit" — attended session in tmux commit window, never pushes
+- [x] manual-by-design (push, upstream) get copyable commands + why-not-automated explanation
+
 ### Open-sourcing polish
 
 - [ ] first-run empty state: welcome card on dashboard + friendly `cockpit list` when registry is empty

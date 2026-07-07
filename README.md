@@ -98,3 +98,7 @@ cockpit dash --install   # optional: dashboard auto-starts at login and self-res
 - `manual` — **never executed**; prints the command (with `cd`) for you to copy-paste. Exit code 2.
 
 Actions with a `window:` key are sent to that tmux window (e.g. long-running dev servers); others run inline in the project root and return the real exit code.
+
+## Actionable attention chips
+
+Every attention chip is a button. Clicking opens a popup that explains the situation and offers the safest available remedy: **auto-fix** where harmless (`pull --ff-only` behind-remote, create a missing config from template), **agent-fix** where judgment helps (uncommitted changes → an attended Claude session in a tmux `commit` window that groups and commits, never pushes), **copyable commands** where your safety model says manual-only (push, set-upstream), and **guidance** where it's genuinely your turn (agent waiting for you). All fixes are audit-logged (`fix:*`).

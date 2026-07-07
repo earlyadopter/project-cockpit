@@ -523,17 +523,37 @@ Propose 3-5 concrete, mutually distinct options for answering the question. Resp
   }
 }
 
-// Start implementing a just-made decision: new "impl" window in the project's
-// tmux session running Claude Code, pre-briefed with the decision. Visible and
-// attended — the human watches/steers it in the normal workspace.
-export async function startImplementation(p: Project, question: string, answer: string): Promise<{ ok: boolean; error?: string }> {
+// Launch an attended Claude Code session in a new tmux window, pre-briefed.
+// Visible and interruptible — the human watches/steers it in the workspace.
+export async function startAgentTask(p: Project, brief: string, window = "impl"): Promise<{ ok: boolean; error?: string }> {
   await ensureSession(p);
-  const wid = sh("tmux", ["new-window", "-d", "-P", "-F", "#{window_id}", "-t", `=${p.name}`, "-c", p.root, "-n", "impl"]).out;
+  const wid = sh("tmux", ["new-window", "-d", "-P", "-F", "#{window_id}", "-t", `=${p.name}`, "-c", p.root, "-n", window]).out;
   if (!wid) return { ok: false, error: "could not create tmux window" };
-  const clean = (s: string) => s.replace(/[;`$\\!]/g, ",").replace(/"/g, "'");
-  const prompt = `We just decided a direction question in plan.md: '${clean(question)}' -> '${clean(answer)}'. Read plan.md, find the matching ticket under the Implementation queue feature, briefly plan the work, then start implementing it. Keep plan.md checkboxes current as you complete work.`;
-  sh("tmux", ["send-keys", "-l", "-t", wid, `claude "${prompt}"`]);
+  sh("tmux", ["send-keys", "-l", "-t", wid, `claude "${brief}"`]);
   sh("tmux", ["send-keys", "-t", wid, "Enter"]);
+  return { ok: true };
+}
+
+export const cleanForPrompt = (s: string) => s.replace(/[;`$\\!]/g, ",").replace(/"/g, "'");
+
+export async function startImplementation(p: Project, question: string, answer: string): Promise<{ ok: boolean; error?: string }> {
+  const prompt = `We just decided a direction question in plan.md: '${cleanForPrompt(question)}' -> '${cleanForPrompt(answer)}'. Read plan.md, find the matching ticket under the Implementation queue feature, briefly plan the work, then start implementing it. Keep plan.md checkboxes current as you complete work.`;
+  return startAgentTask(p, prompt);
+}
+
+// Minimal config for the "no .project-cockpit.yml" one-click fix.
+export function createConfigFromTemplate(p: Project): { ok: boolean; error?: string } {
+  const path = join(p.root, ".project-cockpit.yml");
+  if (existsSync(path)) return { ok: false, error: ".project-cockpit.yml already exists" };
+  writeFileSync(path, `name: ${basename(p.root)}
+focus: ""  # one line: what's in flight right now
+repo: ""
+services: []
+notes: ""
+env_files: []
+actions:
+  push: { cmd: "git push", tier: confirm }
+`);
   return { ok: true };
 }
 
