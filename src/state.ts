@@ -386,27 +386,39 @@ export function readPlan(p: Project): Plan | null {
   for (const rel of candidates) {
     const full = join(p.root, rel);
     if (!existsSync(full)) continue;
+    // Tolerant parsing: `## Direction` checkboxes are questions; ### blocks
+    // anywhere are features; checkboxes sitting directly under any other H2
+    // (e.g. "## Ready to start now") form an implicit feature named after it.
     const plan: Plan = { path: rel, direction: [], features: [] };
-    let section: "direction" | "features" | null = null;
+    let section: "direction" | "other" = "other";
+    let sectionTitle = "";
     let feature: PlanFeature | null = null;
+    let implicit: PlanFeature | null = null;
     for (const line of readFileSync(full, "utf8").split("\n")) {
       const h2 = line.match(/^##(?!#)\s+(.+)/);
       if (h2) {
-        const t = h2[1].trim().toLowerCase();
-        section = t.startsWith("direction") ? "direction" : t.startsWith("feature") ? "features" : null;
+        sectionTitle = h2[1].trim();
+        section = /^direction/i.test(sectionTitle) ? "direction" : "other";
         feature = null;
+        implicit = null;
         continue;
       }
       const h3 = line.match(/^###\s+(.+)/);
       if (h3) {
-        if (section === "features") { feature = { name: h3[1].trim(), tickets: [] }; plan.features.push(feature); }
+        feature = { name: h3[1].trim(), tickets: [] };
+        plan.features.push(feature);
         continue;
       }
       const cb = line.match(/^\s*[-*]\s*\[( |x|X)\]\s+(.+)/);
       if (!cb) continue;
       const item = { done: cb[1].toLowerCase() === "x", text: cb[2].trim() };
-      if (section === "direction") plan.direction.push(item);
-      else if (section === "features" && feature) feature.tickets.push(item);
+      if (section === "direction") { plan.direction.push(item); continue; }
+      if (feature) { feature.tickets.push(item); continue; }
+      if (!implicit) {
+        implicit = { name: sectionTitle && !/^features$/i.test(sectionTitle) ? sectionTitle : "Tickets", tickets: [] };
+        plan.features.push(implicit);
+      }
+      implicit.tickets.push(item);
     }
     return plan;
   }
@@ -531,8 +543,12 @@ export async function startAgentTask(p: Project, brief: string, window = "impl")
   if (!wid) return { ok: false, error: "could not create tmux window" };
   // Detached-created windows are born 80x24; in iTerm2 control mode that
   // mismatch causes a native-window resize tug-of-war ("jumping") while the
-  // TUI redraws. Adopt the attached client's size before anything renders.
-  sh("tmux", ["resize-window", "-A", "-t", wid]);
+  // TUI redraws. Explicitly match the session's current window geometry
+  // (works even with no client attached), then let -A adopt a live client.
+  // (never use resize-window -A here: with no attached client it clamps to 80x24)
+  const size = sh("tmux", ["display-message", "-p", "-t", `=${p.name}`, "#{window_width}x#{window_height}"]).out;
+  const m = size.match(/^(\d+)x(\d+)$/);
+  if (m) sh("tmux", ["resize-window", "-t", wid, "-x", m[1], "-y", m[2]]);
   sh("tmux", ["send-keys", "-l", "-t", wid, `claude "${brief}"`]);
   sh("tmux", ["send-keys", "-t", wid, "Enter"]);
   return { ok: true };
