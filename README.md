@@ -64,6 +64,8 @@ Rendering rules (the file is never reordered — checkboxes are the status): don
 
 The foundation's docs rule tells Claude Code to keep the checkboxes current as it completes work, and the `plan.md` template ships with the base manifest. `cockpit status` shows a one-line summary.
 
+The convention is a versioned spec — `docs/plan-md-spec.md` in the [ai-foundation] repo (this parser targets **v1.0**). The two projects stay separate but linked by contract: if a registered project carries a foundation install marker (`.ai/foundation-version.md`), the dashboard compares it with the foundation repo's current manifest and raises a "foundation vX → vY available" attention chip with audit/refresh commands; "Add project" offers the onboard command for repos that don't have the foundation yet. No foundation repo registered → all of this silently disappears.
+
 ## Agent visibility (Phase 4)
 
 The cockpit detects Claude Code activity per project — best-effort, from two local traces: `claude` processes (matched to project roots by cwd) and session transcripts under `~/.claude/projects/` (mtime = last activity; the last message distinguishes a finished turn from a mid-turn stall, i.e. a likely permission prompt). States:

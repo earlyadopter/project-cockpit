@@ -121,9 +121,51 @@ export function localService(p: Project): Service | undefined {
   return p.cfg.services?.find((s) => s.kind === "local");
 }
 
-export function attentionItems(p: Project, git: GitState, agent?: AgentInfo, plan?: Plan | null): string[] {
+// ---------- foundation (ai-foundation install state; spec: docs/plan-md-spec.md lives there too) ----------
+// A project onboarded with the foundation carries .ai/foundation-version.md.
+// The source-of-truth version comes from the foundation repo itself, found among
+// registered projects by its foundation/manifests/ directory — no hardcoded path.
+export interface FoundationState {
+  installed: string; manifest: string; date: string;
+  current?: string; sourceRoot?: string; outdated: boolean;
+}
+
+export function foundationSource(): { root: string; scripts: string } | null {
+  for (const root of loadRegistry()) {
+    if (existsSync(join(root, "foundation", "manifests")) && existsSync(join(root, "scripts", "onboard-project.sh"))) {
+      return { root, scripts: join(root, "scripts") };
+    }
+  }
+  return null;
+}
+
+export function readFoundation(p: Project): FoundationState | null {
+  const marker = join(p.root, ".ai", "foundation-version.md");
+  if (!existsSync(marker)) return null;
+  const text = readFileSync(marker, "utf8");
+  const field = (k: string) => text.match(new RegExp(`^${k}: *(.+)$`, "m"))?.[1]?.trim() ?? "";
+  const installed = field("installed");
+  const manifest = field("manifest") || "base";
+  const state: FoundationState = { installed, manifest, date: field("date"), outdated: false };
+  const src = foundationSource();
+  if (src) {
+    const manifestFile = join(src.root, "foundation", "manifests", `${manifest}.yaml`);
+    if (existsSync(manifestFile)) {
+      const current = readFileSync(manifestFile, "utf8").match(/^version: *"?([\d.]+)"?/m)?.[1];
+      if (current) {
+        state.current = current;
+        state.sourceRoot = src.root;
+        state.outdated = current !== installed;
+      }
+    }
+  }
+  return state;
+}
+
+export function attentionItems(p: Project, git: GitState, agent?: AgentInfo, plan?: Plan | null, foundation?: FoundationState | null): string[] {
   const items: string[] = [];
   if (agent?.state === "waiting") items.push("agent waiting for you");
+  if (foundation?.outdated) items.push(`foundation v${foundation.installed} → v${foundation.current} available`);
   if (plan) {
     const q = plan.direction.filter((d) => !d.done).length;
     if (q > 0) items.push(`${q} open question${q > 1 ? "s" : ""}`);

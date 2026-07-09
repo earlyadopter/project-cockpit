@@ -23,6 +23,14 @@
 - [x] uncommitted popup shows the actual dirty files; submodules detected and explained (parent commit can't include them)
 - [x] freshness indicator in footer ("updated Ns ago", turns yellow when stale) + refresh-now button
 
+### Foundation links (contract with ai-foundation — separate repos, shared spec)
+
+- [x] plan.md parser targets the versioned convention spec (`docs/plan-md-spec.md` v1.0 in ai-foundation); README states the version (2026-07-09)
+- [x] foundation drift chip: reads `.ai/foundation-version.md`, finds the foundation repo among registered projects (no hardcoded path), compares manifest versions; fix modal shows read-only audit + additive onboard-refresh commands (2026-07-09)
+- [x] add-project hand-off: registering an un-onboarded repo offers the onboard command in a modal — suggestion only, never run unasked (2026-07-09)
+- [ ] one-click foundation refresh as a confirm-tier action once upgrade-project.sh exists (issue #8 in ai-foundation)
+- [ ] asset-level drift in the chip detail (surface audit-project.sh --json output, not just version compare)
+
 ### Open-sourcing polish
 
 - [ ] first-run empty state: welcome card on dashboard + friendly `cockpit list` when registry is empty

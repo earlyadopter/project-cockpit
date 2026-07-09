@@ -10,7 +10,7 @@ import { createInterface } from "node:readline/promises";
 import {
   AUDIT_FILE, OPEN_TARGETS, REGISTRY_FILE,
   type Project, type Tier,
-  agentState, allProjects, attentionItems, audit, claudeCwds, ensureSession, gitState,
+  agentState, allProjects, attentionItems, audit, claudeCwds, ensureSession, gitState, readFoundation,
   humanAge, loadProject, loadRegistry, localService, openTarget, planStats, portListening,
   readPlan, saveRegistry, sendToWindow, sh, tmuxSessionAlive, tmuxWindows,
 } from "./state.ts";
@@ -71,7 +71,7 @@ async function cmdList(): Promise<void> {
       svc?.port ? portListening(svc.port) : Promise.resolve(null),
       agentState(p, cwds),
     ]);
-    const attention = attentionItems(p, git, agent, readPlan(p));
+    const attention = attentionItems(p, git, agent, readPlan(p), readFoundation(p));
     return { p, git, session, devUp, agent, attention };
   }));
   rows.sort((a, b) => (b.attention.length ? 1 : 0) - (a.attention.length ? 1 : 0) || a.p.name.localeCompare(b.p.name));
@@ -93,7 +93,7 @@ async function cmdStatus(query: string): Promise<void> {
   const p = findProject(query);
   const [git, agent] = await Promise.all([gitState(p.root), claudeCwds().then((c) => agentState(p, c))]);
   const plan = readPlan(p);
-  const attention = attentionItems(p, git, agent, plan);
+  const attention = attentionItems(p, git, agent, plan, readFoundation(p));
 
   console.log(`\n${bold(p.name)}  ${dim(p.root)}`);
   if (p.cfg.focus) console.log(`  focus: ${p.cfg.focus}`);

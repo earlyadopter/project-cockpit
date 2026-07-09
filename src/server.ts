@@ -14,7 +14,8 @@ import {
   type Project,
   agentState, allProjects, answerDirection, attentionItems, audit, claudeCwds, cleanForPrompt,
   createConfigFromTemplate, discoverCandidates, findPlanningRefs, generateOptions,
-  gitState, humanAge, lastPush, loadProject, loadRegistry, localService, openTarget,
+  foundationSource, gitState, humanAge, lastPush, loadProject, loadRegistry, localService, openTarget,
+  readFoundation,
   planStats, portListening, readAudit, readChangelog, readPlan, recentCommits,
   runInline, saveRegistry, sendToWindow, shA, startAgentTask, startImplementation,
   tmuxSessionAlive, tmuxWindows,
@@ -29,13 +30,15 @@ async function projectSummary(p: Project, cwds: Awaited<ReturnType<typeof claude
     agentState(p, cwds),
   ]);
   const plan = readPlan(p);
+  const foundation = readFoundation(p);
   return {
     name: p.name, root: p.root, focus: p.cfg.focus ?? "", branch: git.branch,
     dirty: git.dirty.length, ahead: git.ahead, behind: git.behind,
     session, devPort: svc?.port ?? null, devUp,
     agent: { ...agent, age: humanAge(agent.ageSec) },
     plan, planStats: plan ? planStats(plan) : null,
-    attention: attentionItems(p, git, agent, plan),
+    foundation,
+    attention: attentionItems(p, git, agent, plan, foundation),
   };
 }
 
@@ -135,7 +138,14 @@ export function startServer(port = 4400) {
         paths.push(path);
         saveRegistry(paths);
         audit(name, "add", "safe", `${path} [dash]`);
-        return json({ ok: true, path, name });
+        // Foundation hand-off: if the repo isn't onboarded and the foundation
+        // repo is registered, suggest the onboard command (never run it unasked).
+        let onboardHint: string | null = null;
+        if (!existsSync(join(path, ".ai", "foundation-version.md"))) {
+          const src = foundationSource();
+          if (src) onboardHint = `${src.scripts}/onboard-project.sh ${path}`;
+        }
+        return json({ ok: true, path, name, onboardHint });
       }
 
       if (req.method === "POST" && url.pathname === "/api/plan/answer") {
@@ -750,6 +760,13 @@ function openFix(i) {
   } else if (/open questions?$/.test(item)) {
     html = \`<p>Unanswered Direction questions are the decisions quietly keeping this project in limbo. Each has <b>hints…</b> (context + generated options) and an answer field.</p>
       <p><button class="runbtn" onclick="closeFix(); const el = document.getElementById('plan'); el.open = true; el.scrollIntoView({behavior:'smooth'})">take me to the questions</button></p>\`;
+  } else if (/^foundation v/.test(item)) {
+    const f = d.foundation || {};
+    const scripts = (f.sourceRoot || "") + "/scripts";
+    html = \`<p>This project was onboarded with foundation <b>v\${esc(f.installed || "?")}</b> (\${esc(f.date || "")}); the foundation repo now ships <b>v\${esc(f.current || "?")}</b>. Newer versions add assets (rules, skills, agents, settings) this project doesn't have yet.</p>
+      <p><strong>See exactly what's missing</strong> (read-only):</p>\${fixCmdHtml(scripts + "/audit-project.sh " + d.root)}
+      <p><strong>Then refresh:</strong> re-running onboard is additive — it installs missing assets and never touches files that already exist:</p>\${fixCmdHtml(scripts + "/onboard-project.sh " + d.root)}
+      <p class="mut">Replacing <em>managed blocks</em> in existing files needs the upgrade script (ticketed as issue #8 in the foundation repo) — until then, changed managed content is a manual diff.</p>\`;
   } else if (/no \\.project-cockpit\\.yml/.test(item)) {
     html = \`<p>Without a config the cockpit only sees git and tmux — no services, ports, actions, or focus line.</p>
       <p><button class="runbtn" onclick="fixConfig()">＋ create .project-cockpit.yml from template</button></p><div id="fixout"></div>
@@ -895,7 +912,16 @@ async function submitAdd(path) {
   selected = d.name;
   location.hash = encodeURIComponent(selected);
   openState = {};
-  refresh();
+  await refresh();
+  if (d.onboardHint) {
+    const title = document.getElementById("fixtitle");
+    const body = document.getElementById("fixbody");
+    title.textContent = "＋ " + d.name + " added — onboard it?";
+    body.innerHTML = \`<p>This repo doesn't have the foundation yet (no <code>.ai/foundation-version.md</code>). Onboarding installs rules, skills, the permission profile, and subagents — additively, never overwriting existing files:</p>
+      \${fixCmdHtml(d.onboardHint)}
+      <p class="mut">Optional — the cockpit works either way. Close this if the project shouldn't carry the foundation.</p>\`;
+    document.getElementById("fixmodal").classList.add("open");
+  }
 }
 
 let lastRefreshAt = Date.now();
