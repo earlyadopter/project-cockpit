@@ -3,10 +3,15 @@
 ## Direction
 
 - [x] Extract from ai-foundation to own repo? → yes, done with full git history via subtree split (decided 2026-07-07)
-- [ ] Open-source it? (license, name check, publish where — see checklist below)
-- [ ] Remote access: Tailscale + --host + token first, chat-bot bridge later?
+- [x] Open-source it? (license, name check, publish where — see checklist below) → yes, open-source it (without breaking my cockpit) (decided 2026-07-09)
+- [x] Remote access: Tailscale + --host + token first, chat-bot bridge later? → yes, allow remote access, and document how to set it up for the users in the open-source project (decided 2026-07-09)
 
 ## Features
+
+### Implementation queue
+
+- [ ] yes, open-source it (without breaking my cockpit) — from: Open-source it? (license, name check, publish where — see checklist below)?
+- [x] yes, allow remote access, and document how to set it up for the users in the open-source project — from: Remote access: Tailscale + --host + token first, chat-bot bridge later?
 
 ### Plan as command center
 
@@ -41,13 +46,23 @@
 
 ### Remote access (Tier 1)
 
-- [ ] --host flag on the server (bind beyond 127.0.0.1)
-- [ ] bearer-token auth for non-localhost binds
-- [ ] phone-width responsive pass (collapsible sidebar)
-- [ ] document the Tailscale + SSH/tmux setup for iPad/phone
+- [x] --host flag on the server (bind beyond 127.0.0.1)
+- [x] bearer-token auth for non-localhost binds
+- [x] phone-width responsive pass (collapsible sidebar)
+- [x] document the Tailscale + SSH/tmux setup for iPad/phone
+- [ ] connect-your-phone helper in the dashboard (tokened URL + QR) when a remote bind is active
 
 ### Cockpit v1.5 (carried from ai-foundation plan)
 
 - [ ] checkbox toggling from the dashboard Plan card
 - [ ] "open plan in Cursor/Obsidian" button
 - [ ] macOS notifications for attention items (only if dashboard-glancing proves insufficient)
+
+### Dashboard redesign (design notes 2026-07-10)
+
+- [x] design tokens: neutral ramp, tinted page + borderless white cards (12px radius, shadow), semantic colors reserved for status; dark-mode variants
+- [x] real type scale (11px uppercase micro-labels / 12 / 13 / 14 / 20) with tabular numerals; monospace only for code values
+- [x] tickets & direction questions as truncated list rows with status marks (open circle / green check + dimmed) — strikethrough removed everywhere
+- [x] emoji statuses (✳/✋) replaced by status dot + short label ("Working", "Waiting on you · 10m · 2 sessions")
+- [x] attention chips as soft tinted amber pills; actions as aligned rows with uppercase tier badges and quiet run buttons
+- [ ] hover tooltip is the only path to full ticket text — consider click-to-expand for touch devices (no hover on phones)

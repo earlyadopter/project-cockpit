@@ -2,16 +2,20 @@
 // One process, no daemon state: every request recomputes live state via state.ts.
 // Tier enforcement lives HERE, server-side: safe runs, confirm needs an explicit
 // confirmed flag (set by the UI dialog), manual is always refused with the command
-// to copy. Binds 127.0.0.1 only; non-GET requests must be same-origin.
-// Start with `cockpit dash` or `bun src/server.ts`.
+// to copy. Non-GET requests must be same-origin. Binds 127.0.0.1 by default;
+// --host binds wider (e.g. a Tailscale IP) and then EVERY request must carry the
+// bearer token (see docs/remote-access.md).
+// Start with `cockpit dash` or `bun src/server.ts [port] [--host <ip>]`.
 
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { statSync } from "node:fs";
 import {
   type Project,
+  COCKPIT_DIR,
   agentState, allProjects, answerDirection, attentionItems, audit, claudeCwds, cleanForPrompt,
   createConfigFromTemplate, discoverCandidates, findPlanningRefs, generateOptions,
   foundationSource, gitState, humanAge, lastPush, loadProject, loadRegistry, localService, openTarget,
@@ -88,14 +92,71 @@ function getProject(name: string): Project | undefined {
   return allProjects().find((x) => x.name.toLowerCase() === q);
 }
 
-export function startServer(port = 4400) {
+// ---------- remote access: bind host + bearer token ----------
+// Non-loopback binds require a token on EVERY request (this dashboard runs
+// commands — see docs/remote-access.md). The token persists across restarts in
+// ~/.project-cockpit/token so launchd installs and phone bookmarks keep working.
+const TOKEN_FILE = join(COCKPIT_DIR, "token");
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1"]);
+
+function loadOrCreateToken(): string {
+  if (existsSync(TOKEN_FILE)) {
+    const t = readFileSync(TOKEN_FILE, "utf8").trim();
+    if (t) return t;
+  }
+  const t = randomBytes(24).toString("base64url");
+  mkdirSync(COCKPIT_DIR, { recursive: true });
+  writeFileSync(TOKEN_FILE, t + "\n", { mode: 0o600 });
+  return t;
+}
+
+function tokenMatches(given: string | null | undefined, want: string): boolean {
+  if (!given) return false;
+  const a = Buffer.from(given), b = Buffer.from(want);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
+export interface ServerOpts { host?: string; token?: string }
+
+export function startServer(port = 4400, opts: ServerOpts = {}) {
+  const host = opts.host || "127.0.0.1";
+  const loopbackOnly = LOOPBACK_HOSTS.has(host);
+  // Loopback binds stay friction-free (no token unless one is passed explicitly);
+  // any wider bind refuses to start without one.
+  const token = opts.token || process.env.COCKPIT_TOKEN || (loopbackOnly ? null : loadOrCreateToken());
   const server = Bun.serve({
     port,
-    hostname: "127.0.0.1",
+    hostname: host,
     async fetch(req) {
       const url = new URL(req.url);
       const json = (data: unknown, status = 200) =>
         new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json" } });
+
+      if (token) {
+        const cookieTok = (req.headers.get("cookie") ?? "").match(/(?:^|;\s*)cockpit_token=([^;]+)/)?.[1];
+        const authHdr = req.headers.get("authorization");
+        const bearer = authHdr?.startsWith("Bearer ") ? authHdr.slice(7) : null;
+        if (!tokenMatches(bearer, token) && !tokenMatches(cookieTok, token)) {
+          // One-time login URL: GET /?token=… sets the session cookie, then redirects
+          // to a clean / so the token doesn't linger in the address bar.
+          if (req.method === "GET" && url.pathname === "/" && tokenMatches(url.searchParams.get("token"), token)) {
+            return new Response(null, {
+              status: 303,
+              headers: {
+                location: "/",
+                "set-cookie": `cockpit_token=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000`,
+              },
+            });
+          }
+          if (url.pathname.startsWith("/api/")) return json({ error: "unauthorized — send Authorization: Bearer <token>" }, 401);
+          return new Response("401 unauthorized — open the tokened URL printed by `cockpit dash` (http://…/?token=…)", { status: 401 });
+        }
+      } else {
+        // No token means loopback-only. Refuse requests whose Host header isn't
+        // local — blocks DNS-rebinding tricks against the tokenless localhost bind.
+        const reqHost = url.hostname;
+        if (!LOOPBACK_HOSTS.has(reqHost)) return json({ error: "loopback only" }, 403);
+      }
 
       // Same-origin guard for anything that mutates.
       if (req.method !== "GET") {
@@ -286,7 +347,13 @@ export function startServer(port = 4400) {
       return new Response("not found", { status: 404 });
     },
   });
-  console.log(`cockpit dashboard: http://localhost:${server.port} (Ctrl-C to stop)`);
+  if (token) {
+    console.log(`cockpit dashboard: http://${loopbackOnly ? "localhost" : host}:${server.port} (Ctrl-C to stop)`);
+    console.log(`  token required — open once with: http://${loopbackOnly ? "localhost" : "<this-machine>"}:${server.port}/?token=${token}`);
+    console.log(`  (token file: ${TOKEN_FILE} — API calls can send Authorization: Bearer <token>)`);
+  } else {
+    console.log(`cockpit dashboard: http://localhost:${server.port} (Ctrl-C to stop)`);
+  }
   return server;
 }
 
@@ -297,121 +364,170 @@ const PAGE = `<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>cockpit</title>
 <style>
+  /* Design tokens — 5-step neutral ramp, one accent, semantic colors for status only. */
   :root {
-    --bg: #f6f7f9; --surface: #ffffff; --border: #e3e6ea;
+    --bg: #f4f3f0; --surface: #ffffff;
+    --line: rgba(26,32,41,.07); --border: rgba(26,32,41,.14);
     --ink: #1a2029; --ink-2: #5b6572; --ink-3: #8a93a0;
-    --accent: #2563eb; --ok: #1a7f37; --warn-bg: #fff3cd; --warn-ink: #7a5d00; --warn-border: #e6d28a;
-    --bad: #b42318; --chip-bg: #eef1f4; --overlay: rgba(20,24,29,.45);
+    --accent: #2563eb;
+    --ok: #177a3b; --ok-bg: #e7f4eb;
+    --warn-ink: #8a5a00; --warn-bg: #f9efd8;
+    --bad: #b42318; --bad-bg: #fdecea;
+    --chip-bg: #f0efeb; --overlay: rgba(26,32,41,.45);
+    --shadow: 0 1px 2px rgba(26,32,41,.05), 0 2px 6px rgba(26,32,41,.04);
+    --radius: 12px;
   }
   @media (prefers-color-scheme: dark) {
     :root {
-      --bg: #14181d; --surface: #1c2128; --border: #303842;
+      --bg: #12161b; --surface: #1c222a;
+      --line: rgba(232,236,241,.07); --border: rgba(232,236,241,.16);
       --ink: #e8ecf1; --ink-2: #a6b0bc; --ink-3: #6f7a87;
-      --accent: #6ea8fe; --ok: #4ade80; --warn-bg: #3a2e14; --warn-ink: #ffd561; --warn-border: #6b5a1e;
-      --bad: #f87171; --chip-bg: #262d36; --overlay: rgba(0,0,0,.55);
+      --accent: #6ea8fe;
+      --ok: #4ade80; --ok-bg: rgba(74,222,128,.13);
+      --warn-ink: #f2c94c; --warn-bg: rgba(242,201,76,.13);
+      --bad: #f87171; --bad-bg: rgba(248,113,113,.13);
+      --chip-bg: #262d36; --overlay: rgba(0,0,0,.55);
+      --shadow: inset 0 0 0 1px var(--line);
     }
   }
   * { box-sizing: border-box; }
-  body { margin: 0; font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: var(--bg); color: var(--ink); }
+  body { margin: 0; font: 13px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-variant-numeric: tabular-nums; background: var(--bg); color: var(--ink); }
   .layout { display: flex; min-height: 100vh; }
-  aside { width: 250px; flex: none; border-right: 1px solid var(--border); background: var(--surface); padding: 12px 0; position: sticky; top: 0; height: 100vh; overflow-y: auto; display: flex; flex-direction: column; }
-  aside h1 { font-size: 13px; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-3); margin: 4px 16px 10px; }
+  aside { width: 250px; flex: none; border-right: 1px solid var(--line); background: var(--surface); padding: 12px 0; position: sticky; top: 0; height: 100vh; overflow-y: auto; display: flex; flex-direction: column; }
+  aside h1 { font-size: 11px; font-weight: 500; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-3); margin: 6px 16px 10px; }
   aside .grow { flex: 1; }
-  aside .foot { padding: 10px 16px; font-size: 12px; color: var(--ink-3); border-top: 1px solid var(--border); }
+  aside .foot { padding: 10px 16px; font-size: 12px; color: var(--ink-3); border-top: 1px solid var(--line); }
   aside .foot button { background: none; border: 0; color: var(--accent); cursor: pointer; font: inherit; padding: 0; }
   .proj { display: block; width: 100%; text-align: left; border: 0; background: none; color: var(--ink); padding: 9px 16px; cursor: pointer; font: inherit; border-left: 3px solid transparent; }
   .proj:hover { background: var(--chip-bg); }
   .proj.sel { border-left-color: var(--accent); background: var(--chip-bg); }
   .proj .nm { font-weight: 600; display: flex; align-items: center; gap: 7px; }
-  .proj .sub { color: var(--ink-2); font-size: 12px; margin-left: 17px; }
-  .dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+  .proj .sub { color: var(--ink-2); font-size: 12px; margin-left: 16px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
   .dot.ok { background: var(--ok); } .dot.warn { background: var(--warn-ink); }
+  /* status dot + short label — the only place semantic color is used as signal */
+  .stat { display: inline-flex; align-items: center; gap: 6px; font-weight: 500; white-space: nowrap; }
+  .sdot { width: 8px; height: 8px; border-radius: 50%; flex: none; display: inline-block; }
+  .sdot.ok { background: var(--ok); } .sdot.warn { background: var(--warn-ink); } .sdot.mut { background: var(--ink-3); } .sdot.bad { background: var(--bad); }
+  /* mobile top bar + collapsible sidebar */
+  .mtop { display: none; }
+  #scrim { display: none; position: fixed; inset: 0; background: var(--overlay); z-index: 15; }
+  @media (max-width: 720px) {
+    .mtop { display: flex; align-items: center; gap: 10px; position: sticky; top: 0; z-index: 5; background: var(--surface); box-shadow: var(--shadow); padding: 10px 14px; font-weight: 600; }
+    .mtop button { background: none; border: 0; font-size: 18px; line-height: 1; color: var(--ink); cursor: pointer; padding: 2px 6px; }
+    .mtop .cur { color: var(--ink-3); font-weight: 400; margin-left: auto; font-size: 12px; }
+    .layout { display: block; min-height: auto; }
+    aside { position: fixed; top: 0; left: 0; bottom: 0; height: 100vh; width: min(300px, 82vw); z-index: 20; transform: translateX(-105%); transition: transform .18s ease; box-shadow: 0 0 40px rgba(0,0,0,.25); }
+    aside.open { transform: none; }
+    #scrim.show { display: block; }
+    main { padding: 14px 14px 24px; }
+    header h2 { font-size: 18px; }
+    .ansline input { max-width: 56vw; }
+  }
   main { flex: 1; padding: 22px 26px; min-width: 0; }
-  header .path { color: var(--ink-3); font-size: 12px; }
-  header h2 { margin: 2px 0 2px; font-size: 22px; }
-  .focus { color: var(--ink-2); font-style: italic; margin: 0 0 10px; }
+  header .path { color: var(--ink-3); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  header h2 { margin: 2px 0 2px; font-size: 20px; font-weight: 600; }
+  .focus { color: var(--ink-2); margin: 0 0 10px; }
   .links { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0 4px; }
-  .links a, .links button { text-decoration: none; color: var(--accent); background: var(--chip-bg); border: 1px solid var(--border); padding: 4px 11px; border-radius: 999px; font-size: 13px; cursor: pointer; font-family: inherit; }
+  .links a, .links button { text-decoration: none; color: var(--accent); background: var(--surface); border: 1px solid var(--border); padding: 4px 12px; border-radius: 999px; font-size: 12px; cursor: pointer; font-family: inherit; }
   .links a:hover, .links button:hover { border-color: var(--accent); }
   .attn { display: flex; flex-wrap: wrap; gap: 8px; margin: 14px 0; }
-  .attnbtn { background: var(--warn-bg); color: var(--warn-ink); border: 1px solid var(--warn-border); padding: 3px 10px; border-radius: 6px; font-size: 13px; font-weight: 500; font-family: inherit; cursor: pointer; }
-  .attnbtn:hover { border-color: var(--warn-ink); }
+  .attnbtn { background: var(--warn-bg); color: var(--warn-ink); border: 0; padding: 5px 13px; border-radius: 999px; font-size: 12.5px; font-weight: 500; font-family: inherit; cursor: pointer; }
+  .attnbtn:hover { box-shadow: inset 0 0 0 1px var(--warn-ink); }
   .attnbtn .chev { margin-left: 6px; opacity: .6; }
   .fixcmd { display: flex; gap: 8px; align-items: center; margin: 8px 0; }
-  .fixcmd code { background: var(--chip-bg); border: 1px solid var(--border); border-radius: 6px; padding: 5px 10px; flex: 1; overflow-x: auto; white-space: nowrap; }
-  .calm { color: var(--ok); font-size: 13px; margin: 14px 0; }
-  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(420px, 1fr)); gap: 14px; margin-top: 10px; }
-  .cards.small { grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
-  .cards.small details { font-size: 12.5px; }
-  .cards.small summary { padding: 8px 12px; font-size: 13px; }
-  .cards.small .body { padding: 0 12px 10px; }
+  .fixcmd code { background: var(--chip-bg); border-radius: 6px; padding: 5px 10px; flex: 1; overflow-x: auto; white-space: nowrap; }
+  .calm { color: var(--ink-2); font-size: 13px; margin: 14px 0; display: flex; align-items: center; gap: 7px; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(420px, 100%), 1fr)); gap: 14px; margin-top: 10px; }
+  .cards.small { grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr)); }
+  .cards.small details { font-size: 12px; }
+  .cards.small summary { padding: 10px 14px; font-size: 13px; }
+  .cards.small .body { padding: 0 14px 12px; }
   .cards.small pre { max-height: 170px; font-size: 11px; }
   .cards.small .commit { font-size: 12px; }
-  .tkbtn { cursor: pointer; font-family: inherit; text-align: left; }
-  .tkbtn:hover { border-color: var(--accent); color: var(--accent); }
-  details.card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 0; overflow: hidden; }
+  details.card { background: var(--surface); border-radius: var(--radius); padding: 0; overflow: hidden; box-shadow: var(--shadow); }
   details.wide { grid-column: 1 / -1; }
-  summary { cursor: pointer; padding: 11px 14px; font-weight: 600; list-style: none; display: flex; align-items: center; gap: 8px; user-select: none; }
-  summary::before { content: "▸"; color: var(--ink-3); font-size: 11px; transition: transform .12s; }
+  summary { cursor: pointer; padding: 12px 16px; font-size: 14px; font-weight: 500; list-style: none; display: flex; align-items: center; gap: 8px; user-select: none; }
+  summary::-webkit-details-marker { display: none; }
+  summary::before { content: "▸"; color: var(--ink-3); font-size: 10px; transition: transform .12s; }
   details[open] summary::before { transform: rotate(90deg); }
   summary .hint { font-weight: 400; color: var(--ink-3); font-size: 12px; margin-left: auto; }
-  .body { padding: 2px 14px 13px; }
+  .body { padding: 2px 16px 14px; }
   table { border-collapse: collapse; width: 100%; }
   td { padding: 3px 10px 3px 0; vertical-align: top; }
   td.k { color: var(--ink-2); white-space: nowrap; width: 1%; }
   .mono, pre, code { font: 12px/1.5 ui-monospace, "SF Mono", Menlo, monospace; }
-  pre { background: var(--chip-bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; overflow-x: auto; white-space: pre-wrap; word-break: break-word; margin: 6px 0 0; max-height: 340px; overflow-y: auto; }
+  pre { background: var(--chip-bg); border-radius: 8px; padding: 10px 12px; overflow-x: auto; white-space: pre-wrap; word-break: break-word; margin: 6px 0 0; max-height: 340px; overflow-y: auto; }
   .ok-t { color: var(--ok); } .bad-t { color: var(--bad); } .mut { color: var(--ink-3); }
-  .tier { font-size: 11px; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--border); }
-  .tier.safe { color: var(--ok); } .tier.confirm { color: var(--warn-ink); background: var(--warn-bg); border-color: var(--warn-border); } .tier.manual { color: var(--bad); }
-  .commit { display: flex; gap: 10px; padding: 2px 0; }
-  .commit .h { color: var(--ink-3); flex: none; } .commit .a { color: var(--ink-3); margin-left: auto; flex: none; }
+  .tier { font-size: 10.5px; font-weight: 500; letter-spacing: .04em; text-transform: uppercase; padding: 2px 8px; border-radius: 999px; flex: none; }
+  .tier.safe { color: var(--ok); background: var(--ok-bg); } .tier.confirm { color: var(--warn-ink); background: var(--warn-bg); } .tier.manual { color: var(--bad); background: var(--bad-bg); }
+  .commit { display: flex; gap: 10px; padding: 3px 0; align-items: baseline; min-width: 0; }
+  .commit .s { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .commit .h { color: var(--ink-3); flex: none; } .commit .a { color: var(--ink-3); margin-left: auto; flex: none; font-size: 12px; }
+  /* actions: aligned rows — name · command · tier badge · quiet button */
+  .act { display: flex; align-items: center; gap: 10px; padding: 7px 0; border-top: 1px solid var(--line); min-width: 0; }
+  .act:first-child { border-top: 0; }
+  .act .an { font-weight: 500; flex: none; min-width: 92px; }
+  .act code { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; background: var(--chip-bg); border-radius: 5px; padding: 2px 8px; color: var(--ink-2); }
+  .act .win { flex: none; color: var(--ink-3); font-size: 12px; }
   footer { color: var(--ink-3); font-size: 12px; margin-top: 18px; }
   .empty { color: var(--ink-3); padding: 40px; text-align: center; }
-  .runbtn { font: 12px inherit; padding: 2px 12px; border-radius: 999px; border: 1px solid var(--border); background: var(--chip-bg); color: var(--ink); cursor: pointer; }
+  .runbtn { font: 12px inherit; padding: 3px 12px; border-radius: 7px; border: 1px solid var(--border); background: none; color: var(--ink-2); cursor: pointer; flex: none; }
   .runbtn:hover { border-color: var(--accent); color: var(--accent); }
   .runbtn:disabled { opacity: .5; cursor: wait; }
   kbd { font: 11px ui-monospace, Menlo, monospace; background: var(--chip-bg); border: 1px solid var(--border); border-bottom-width: 2px; border-radius: 4px; padding: 0 5px; }
-  #palette, #addmodal, #hintmodal, #fixmodal { position: fixed; inset: 0; background: var(--overlay); display: none; z-index: 10; }
+  #palette, #addmodal, #hintmodal, #fixmodal { position: fixed; inset: 0; background: var(--overlay); display: none; z-index: 30; }
   #palette.open, #addmodal.open, #hintmodal.open, #fixmodal.open { display: block; }
-  #fixmodal .box { margin: 12vh auto 0; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; box-shadow: 0 18px 50px rgba(0,0,0,.3); max-height: 76vh; display: flex; flex-direction: column; }
-  #palette .box, #addmodal .box { width: min(560px, 90vw); margin: 12vh auto 0; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; box-shadow: 0 18px 50px rgba(0,0,0,.3); }
-  #hintmodal .box { width: min(1100px, 94vw); margin: 5vh auto 0; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; box-shadow: 0 18px 50px rgba(0,0,0,.3); display: flex; flex-direction: column; max-height: 88vh; }
+  #fixmodal .box { margin: 12vh auto 0; background: var(--surface); border-radius: var(--radius); overflow: hidden; box-shadow: 0 18px 50px rgba(0,0,0,.3); max-height: 76vh; display: flex; flex-direction: column; }
+  #palette .box, #addmodal .box { width: min(560px, 90vw); margin: 12vh auto 0; background: var(--surface); border-radius: var(--radius); overflow: hidden; box-shadow: 0 18px 50px rgba(0,0,0,.3); }
+  #hintmodal .box { width: min(1100px, 94vw); margin: 5vh auto 0; background: var(--surface); border-radius: var(--radius); overflow: hidden; box-shadow: 0 18px 50px rgba(0,0,0,.3); display: flex; flex-direction: column; max-height: 88vh; }
   #hintmodal .items { max-height: none; overflow-y: auto; flex: 1; }
   #hintmodal pre { margin: 4px 0 8px; max-height: 48vh; }
-  .optitem { border-top: 1px solid var(--border); padding: 10px 12px; border-radius: 8px; cursor: pointer; position: relative; }
+  .optitem { border-top: 1px solid var(--line); padding: 10px 12px; border-radius: 8px; cursor: pointer; position: relative; }
+  .optitem:hover { background: var(--chip-bg); }
   .optitem .tick { position: absolute; right: 12px; top: 10px; color: var(--accent); font-weight: 700; visibility: hidden; }
   .optitem.sel { background: var(--chip-bg); outline: 2px solid var(--accent); outline-offset: -2px; }
   .optitem.sel .tick { visibility: visible; }
-  #hintfoot { border-top: 1px solid var(--border); padding: 10px 16px; display: flex; align-items: center; gap: 12px; flex: none; }
+  #hintfoot { border-top: 1px solid var(--line); padding: 10px 16px; display: flex; align-items: center; gap: 12px; flex: none; }
   #hintfoot .expl { color: var(--ink-3); font-size: 12px; line-height: 1.4; }
-  #palette input, #addmodal input { width: 100%; border: 0; outline: 0; background: none; color: var(--ink); font: 16px inherit; padding: 14px 16px; border-bottom: 1px solid var(--border); }
+  #palette input, #addmodal input { width: 100%; border: 0; outline: 0; background: none; color: var(--ink); font: 16px inherit; padding: 14px 16px; border-bottom: 1px solid var(--line); }
   #palette .items, #addmodal .items { max-height: 46vh; overflow-y: auto; }
   #palette .item, #addmodal .item { padding: 9px 16px; cursor: pointer; display: flex; gap: 10px; align-items: baseline; }
   #palette .item.hot, #palette .item:hover, #addmodal .item:hover { background: var(--chip-bg); }
   #palette .item .k2, #addmodal .item .k2 { color: var(--ink-3); font-size: 12px; margin-left: auto; flex: none; }
   #addmodal .hdr { padding: 8px 16px 4px; color: var(--ink-3); font-size: 12px; }
-  .plansec { font-size: 11px; letter-spacing: .07em; text-transform: uppercase; color: var(--ink-3); margin: 10px 0 4px; }
-  .plq { padding: 3px 0; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-  .plq.done { color: var(--ink-3); display: block; }
+  .plansec { font-size: 11px; font-weight: 500; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-3); margin: 12px 0 4px; }
+  .plq { padding: 4px 0; display: flex; align-items: center; gap: 9px; flex-wrap: wrap; min-width: 0; }
+  .plq .qt { flex: 1; min-width: 220px; }
+  .plq.done { color: var(--ink-3); flex-wrap: nowrap; }
+  .plq.done .qt { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .ansline { display: inline-flex; gap: 6px; align-items: center; margin-left: auto; }
-  .ansline input { width: 300px; max-width: 40vw; font: 12.5px inherit; color: var(--ink); background: var(--chip-bg); border: 1px solid var(--border); border-radius: 6px; padding: 3px 9px; outline: none; }
+  .ansline input { width: 300px; max-width: 40vw; font: 12.5px inherit; color: var(--ink); background: var(--chip-bg); border: 1px solid transparent; border-radius: 6px; padding: 3px 9px; outline: none; }
   .ansline input:focus { border-color: var(--accent); }
-  .feat { padding: 6px 0; border-top: 1px solid var(--border); }
+  .feat { padding: 8px 0; border-top: 1px solid var(--line); }
   .feat:first-of-type { border-top: 0; }
   .feat.done .fhead { color: var(--ink-3); }
-  .fhead { font-weight: 600; display: flex; align-items: center; gap: 10px; }
+  .fhead { font-weight: 500; display: flex; align-items: center; gap: 8px; }
   .fprog { margin-left: auto; display: flex; align-items: center; gap: 7px; font-weight: 400; font-size: 12px; color: var(--ink-3); }
-  .fbar { width: 90px; height: 6px; border-radius: 3px; background: var(--chip-bg); border: 1px solid var(--border); overflow: hidden; display: inline-block; }
+  .fbar { width: 90px; height: 5px; border-radius: 3px; background: var(--chip-bg); overflow: hidden; display: inline-block; }
   .fbar > span { display: block; height: 100%; background: var(--accent); }
-  .ftickets { margin-top: 3px; display: flex; flex-wrap: wrap; gap: 6px; }
-  .tk { background: var(--chip-bg); border: 1px solid var(--border); border-radius: 6px; padding: 2px 9px; font-size: 12.5px; }
-  .tk.done { color: var(--ink-3); }
+  /* tickets: truncated list rows with status marks — full text on hover; never strikethrough */
+  .ftickets { margin-top: 4px; }
+  .trow { display: flex; align-items: center; gap: 9px; width: 100%; padding: 5px 4px; border: 0; border-top: 1px solid var(--line); background: none; color: var(--ink); font: inherit; text-align: left; border-radius: 6px; min-width: 0; }
+  .trow:first-child { border-top: 0; }
+  .trow .tt { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .trow.done { color: var(--ink-3); }
+  button.trow { cursor: pointer; }
+  button.trow:hover { background: var(--chip-bg); }
+  .oc { flex: none; width: 8px; height: 8px; border-radius: 50%; border: 1.5px solid var(--ink-3); }
+  .ck { flex: none; color: var(--ok); font-size: 12px; width: 11px; text-align: center; }
 </style>
 </head>
 <body>
+<div class="mtop"><button onclick="toggleSide()" aria-label="projects menu">☰</button><span>cockpit</span><span class="cur" id="mcur"></span></div>
+<div id="scrim" onclick="toggleSide(false)"></div>
 <div class="layout">
-  <aside>
+  <aside id="aside">
     <h1>Projects</h1><div id="side"></div>
     <button class="proj" onclick="openAdd()" style="color:var(--accent)">＋ Add project…</button>
     <div class="grow"></div>
@@ -467,18 +583,30 @@ function card(id, title, hint, bodyHtml, wide) {
     <div class="body">\${bodyHtml}</div></details>\`;
 }
 
+function toggleSide(force) {
+  const open = force !== undefined ? force : !document.getElementById("aside").classList.contains("open");
+  document.getElementById("aside").classList.toggle("open", open);
+  document.getElementById("scrim").classList.toggle("show", open);
+}
+
 async function refresh() {
   projectsCache = await (await fetch("/api/projects")).json();
   if (!selected && projectsCache.length) selected = projectsCache[0].name;
-  document.getElementById("side").innerHTML = projectsCache.map((p) => \`
+  document.getElementById("side").innerHTML = projectsCache.map((p) => {
+    const agent = p.agent.state === "working" ? ' · <span class="stat" style="font-size:12px"><span class="sdot ok"></span>agent</span>'
+      : p.agent.state === "waiting" ? ' · <span class="stat" style="font-size:12px;color:var(--warn-ink)"><span class="sdot warn"></span>needs you</span>' : "";
+    return \`
     <button class="proj \${p.name === selected ? "sel" : ""}" onclick="pick('\${esc(p.name)}')">
       <div class="nm"><span class="dot \${p.attention.length ? "warn" : "ok"}"></span>\${esc(p.name)}</div>
-      <div class="sub">\${esc(p.branch || "—")}\${p.session ? " · tmux" : ""}\${p.devUp ? " · :" + p.devPort : ""}\${p.agent.state === "working" ? " · agent ✳" : p.agent.state === "waiting" ? " · agent ✋" : ""}\${p.attention.length ? " · ▲ " + p.attention.length : ""}</div>
-    </button>\`).join("");
+      <div class="sub">\${esc(p.branch || "—")}\${p.session ? " · tmux" : ""}\${p.devUp ? " · :" + p.devPort : ""}\${agent}\${p.attention.length ? \` · <span style="color:var(--warn-ink)">\${p.attention.length} to review</span>\` : ""}</div>
+    </button>\`;
+  }).join("");
+  const mcur = document.getElementById("mcur");
+  if (mcur) mcur.textContent = selected || "";
   if (selected) renderDetail();
 }
 
-function pick(name) { selected = name; location.hash = encodeURIComponent(name); openState = {}; refresh(); }
+function pick(name) { selected = name; location.hash = encodeURIComponent(name); openState = {}; toggleSide(false); refresh(); }
 
 async function openIn(target) {
   const r = await fetch("/api/open", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ project: selected, target }) });
@@ -549,23 +677,24 @@ async function renderDetail() {
   ].filter(Boolean).join("");
 
   const attn = d.attention.length
-    ? \`<div class="attn">\${d.attention.map((a, ai) => \`<button class="attnbtn" onclick="openFix(\${ai})">▲ \${esc(a)}<span class="chev">›</span></button>\`).join("")}</div>\`
-    : \`<div class="calm">✓ nothing needs attention</div>\`;
+    ? \`<div class="attn">\${d.attention.map((a, ai) => \`<button class="attnbtn" onclick="openFix(\${ai})">\${esc(a)}<span class="chev">›</span></button>\`).join("")}</div>\`
+    : \`<div class="calm"><span class="sdot ok"></span>all clear</div>\`;
 
   const gitBody = d.branch ? \`<table>
       <tr><td class="k">branch</td><td class="mono">\${esc(d.branch)}\${d.hasUpstream ? \` <span class="mut">↑\${d.ahead} ↓\${d.behind}</span>\` : \` <span class="mut">(\${d.hasRemote ? "no upstream" : "no remote"})</span>\`}</td></tr>
       <tr><td class="k">last commit</td><td>\${esc(d.lastCommit)} <span class="mut">(\${esc(d.lastCommitAge)})</span></td></tr>
-      \${d.dirtyTotal ? \`<tr><td class="k">dirty (\${d.dirtyTotal})</td><td><pre>\${esc(d.dirtyFiles.map((l) => (d.submodulesDirty ?? []).includes(dirtyPath(l)) ? l + "   ← submodule (commit inside it)" : l).join("\\n"))}\${d.dirtyTotal > 20 ? "\\n…" : ""}</pre></td></tr>\` : \`<tr><td class="k">worktree</td><td class="ok-t">clean ✓</td></tr>\`}
+      \${d.dirtyTotal ? \`<tr><td class="k">dirty (\${d.dirtyTotal})</td><td><pre>\${esc(d.dirtyFiles.map((l) => (d.submodulesDirty ?? []).includes(dirtyPath(l)) ? l + "   ← submodule (commit inside it)" : l).join("\\n"))}\${d.dirtyTotal > 20 ? "\\n…" : ""}</pre></td></tr>\` : \`<tr><td class="k">worktree</td><td><span class="stat"><span class="sdot ok"></span>clean</span></td></tr>\`}
     </table>\` : '<span class="mut">not a git repository</span>';
 
-  const agentHtml = d.agent.state === "working" ? \`<span class="ok-t">working ✳</span> <span class="mut">— \${esc(d.agent.detail)}, \${esc(d.agent.age)}</span>\`
-    : d.agent.state === "waiting" ? \`<span style="color:var(--warn-ink)">waiting for you ✋</span> <span class="mut">— \${esc(d.agent.detail)}, \${esc(d.agent.age)}</span>\`
-    : d.agent.state === "idle" ? \`<span class="mut">idle — \${esc(d.agent.detail)}</span>\`
+  const agentMeta = [d.agent.age, d.agent.procs > 1 ? d.agent.procs + " sessions" : ""].filter(Boolean).join(" · ");
+  const agentHtml = d.agent.state === "working" ? \`<span class="stat" title="\${esc(d.agent.detail)}"><span class="sdot ok"></span>Working</span>\${agentMeta ? \` <span class="mut">· \${esc(agentMeta)}</span>\` : ""}\`
+    : d.agent.state === "waiting" ? \`<span class="stat" style="color:var(--warn-ink)" title="\${esc(d.agent.detail)}"><span class="sdot warn"></span>Waiting on you</span>\${agentMeta ? \` <span class="mut">· \${esc(agentMeta)}</span>\` : ""}\`
+    : d.agent.state === "idle" ? \`<span class="stat mut" title="\${esc(d.agent.detail)}"><span class="sdot mut"></span>Idle</span>\`
     : '<span class="mut">none</span>';
   const wsBody = \`<table>
-      <tr><td class="k">tmux</td><td>\${d.session ? \`<span class="ok-t">session running ✓</span> <span class="mut">(\${d.windows.map(esc).join(", ")})</span>\` : \`<span class="mut">no session — <code>cockpit go \${esc(d.name)}</code></span>\`}</td></tr>
-      <tr><td class="k">agent</td><td>\${agentHtml}\${d.agent.procs > 1 ? \` <span class="mut">(\${d.agent.procs} instances)</span>\` : ""}</td></tr>
-      \${(d.services || []).filter((s) => s.port).map((s) => \`<tr><td class="k">:\${s.port}</td><td>\${s.up ? '<span class="ok-t">listening ✓</span>' : '<span class="mut">down</span>'} <span class="mut">\${esc(s.name || "")}</span></td></tr>\`).join("")}
+      <tr><td class="k">tmux</td><td>\${d.session ? \`<span class="stat"><span class="sdot ok"></span>running</span> <span class="mut">(\${d.windows.map(esc).join(", ")})</span>\` : \`<span class="mut">no session — <code>cockpit go \${esc(d.name)}</code></span>\`}</td></tr>
+      <tr><td class="k">agent</td><td>\${agentHtml}</td></tr>
+      \${(d.services || []).filter((s) => s.port).map((s) => \`<tr><td class="k">:\${s.port}</td><td>\${s.up ? '<span class="stat"><span class="sdot ok"></span>listening</span>' : '<span class="stat mut"><span class="sdot mut"></span>down</span>'} <span class="mut">\${esc(s.name || "")}</span></td></tr>\`).join("")}
       \${d.envFiles.length ? \`<tr><td class="k">env files</td><td class="mono">\${d.envFiles.map((f) => f.exists ? esc(f.path) : \`<span class="bad-t">\${esc(f.path)} missing</span>\`).join(", ")}</td></tr>\` : ""}
     </table>\`;
 
@@ -575,17 +704,17 @@ async function renderDetail() {
     : '<span class="mut">no remote branch found</span>';
 
   const commitsBody = d.commits.length
-    ? d.commits.map((c) => \`<div class="commit"><span class="h mono">\${esc(c.hash)}</span><span>\${esc(c.subject)}</span><span class="a">\${esc(c.age)}</span></div>\`).join("")
+    ? d.commits.map((c) => \`<div class="commit"><span class="h mono">\${esc(c.hash)}</span><span class="s" title="\${esc(c.subject)}">\${esc(c.subject)}</span><span class="a">\${esc(c.age)}</span></div>\`).join("")
     : '<span class="mut">no commits</span>';
 
   const actionsBody = d.actions.length
-    ? \`<table>\${d.actions.map((a) => {
+    ? d.actions.map((a) => {
         const btn = a.tier === "manual"
           ? \`<button class="runbtn" onclick="copyCmd(\${JSON.stringify("cd " + d.root + " && " + a.cmd).replace(/"/g, "&quot;")}, this)">copy</button>\`
           : \`<button class="runbtn" id="act-\${esc(a.name)}" onclick="runAction('\${esc(a.name)}')">run</button>\`;
-        return \`<tr><td class="k">\${esc(a.name)}</td><td>\${btn} <span class="tier \${a.tier}">\${a.tier}</span> <code>\${esc(a.cmd)}</code>\${a.window ? \` <span class="mut">→ tmux:\${esc(a.window)}</span>\` : ""}</td></tr>\`;
-      }).join("")}</table>
-      <div id="runout">\${runOutHtml}</div>
+        return \`<div class="act"><span class="an">\${esc(a.name)}</span><code title="\${esc(a.cmd)}">\${esc(a.cmd)}</code>\${a.window ? \`<span class="win">tmux:\${esc(a.window)}</span>\` : ""}<span class="tier \${a.tier}">\${a.tier}</span>\${btn}</div>\`;
+      }).join("") +
+      \`<div id="runout">\${runOutHtml}</div>
       <div class="mut" style="margin-top:8px">safe runs · confirm asks first · <span class="bad-t">manual is never run from here</span> — copy and paste it yourself. Everything is audit-logged.</div>\`
     : '<span class="mut">no actions declared</span><div id="runout"></div>';
 
@@ -599,9 +728,9 @@ async function renderDetail() {
     let qi = -1;
     const dirHtml = dirSorted.length
       ? \`<div class="plansec">Direction</div>\` + dirSorted.map((q) => {
-          if (q.done) return \`<div class="plq done">✓ <s>\${esc(q.text)}</s></div>\`;
+          if (q.done) return \`<div class="plq done"><span class="ck">✓</span><span class="qt" title="\${esc(q.text)}">\${esc(q.text)}</span></div>\`;
           qi++;
-          return \`<div class="plq">? \${esc(q.text)}
+          return \`<div class="plq"><span class="oc"></span><span class="qt">\${esc(q.text)}</span>
               <span class="ansline"><button class="runbtn" onclick="openHints(\${qi})">hints…</button>
               <input id="ansin-\${qi}" placeholder="answer → decision + ticket"
                 onkeydown="if(event.key==='Enter')submitAnswer(\${qi})">
@@ -616,19 +745,19 @@ async function renderDetail() {
           const fd = featureDone(f);
           const tickets = [...f.tickets].sort((a, b) => (a.done ? 1 : 0) - (b.done ? 1 : 0))
             .map((t) => {
-              if (t.done) return \`<span class="tk done"><s>\${esc(t.text)}</s></span>\`;
+              if (t.done) return \`<div class="trow done"><span class="ck">✓</span><span class="tt" title="\${esc(t.text)}">\${esc(t.text)}</span></div>\`;
               const wi = window._planTickets.push({ feature: f.name, text: t.text }) - 1;
-              return \`<button class="tk tkbtn" title="start implementing this ticket" onclick="workTicket(\${wi})">▸ \${esc(t.text)}</button>\`;
+              return \`<button class="trow" title="start implementing: \${esc(t.text)}" onclick="workTicket(\${wi})"><span class="oc"></span><span class="tt">\${esc(t.text)}</span></button>\`;
             }).join("");
           return \`<div class="feat \${fd ? "done" : ""}">
-            <div class="fhead">\${fd ? \`<s>\${esc(f.name)}</s>\` : esc(f.name)}
+            <div class="fhead">\${fd ? \`<span class="ck">✓</span>\` : ""}\${esc(f.name)}
               <span class="fprog"><span class="fbar"><span style="width:\${total ? Math.round((done / total) * 100) : 0}%"></span></span> \${done}/\${total}</span></div>
             <div class="ftickets">\${tickets || '<span class="mut">no tickets yet</span>'}</div></div>\`;
         }).join("")
       : "";
     planBody = (dirHtml + featHtml) || '<span class="mut">plan.md found but empty — add ## Direction and ## Features sections</span>';
   } else {
-    planBody = '<span class="mut">no plan.md — create one at the repo root: <code>## Direction</code> with checkbox questions, <code>## Features</code> with <code>### feature</code> blocks of checkbox tickets. Done items get struck through and sink automatically.</span>';
+    planBody = '<span class="mut">no plan.md — create one at the repo root: <code>## Direction</code> with checkbox questions, <code>## Features</code> with <code>### feature</code> blocks of checkbox tickets. Done items get a check, dim, and sink automatically.</span>';
   }
 
   const clBody = d.changelog
@@ -713,7 +842,7 @@ async function submitAnswer(i) {
     const ir = await fetch("/api/plan/implement", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ project: selected, question, answer }) });
     const id = await ir.json();
     if (!ir.ok) alert(id.error || "failed to start implementation");
-    else alert("Implementation running in tmux window \\"impl\\" — watch it with: cockpit go " + selected + "\\nThe agent indicator on this dashboard will show it as working ✳.");
+    else alert("Implementation running in tmux window \\"impl\\" — watch it with: cockpit go " + selected + "\\nThe agent indicator on this dashboard will show it as Working.");
   }
   refresh();
 }
@@ -813,7 +942,7 @@ async function workTicket(i) {
   const r = await fetch("/api/plan/work", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ project: selected, feature: t.feature, ticket: t.text }) });
   const d = await r.json();
   if (!r.ok) { alert(d.error || "failed"); return; }
-  alert("Working on it — tmux window \\"impl\\" in " + selected + ". The agent indicator will show ✳ while it works; watch with: cockpit go " + selected);
+  alert("Working on it — tmux window \\"impl\\" in " + selected + ". The agent indicator will show Working while it runs; watch with: cockpit go " + selected);
   refresh();
 }
 
@@ -941,4 +1070,12 @@ setInterval(refresh, 10000);
 </body>
 </html>`;
 
-if (import.meta.main) startServer(Number(process.argv[2]) || 4400);
+if (import.meta.main) {
+  const argv = process.argv.slice(2);
+  const flagVal = (name: string) => {
+    const i = argv.indexOf(name);
+    return i >= 0 ? argv[i + 1] : undefined;
+  };
+  const port = Number(argv.find((a) => /^\d+$/.test(a))) || 4400;
+  startServer(port, { host: flagVal("--host"), token: flagVal("--token") });
+}

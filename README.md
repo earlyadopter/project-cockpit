@@ -89,11 +89,16 @@ cockpit dash --install   # optional: dashboard auto-starts at login and self-res
 
 `--install` writes `~/Library/LaunchAgents/com.project-cockpit.dash.plist` (RunAtLoad + KeepAlive, PATH including Homebrew/bun so tmux detection works; logs at `~/.project-cockpit/dash.log`). Remove with `cockpit dash --uninstall`. After a reboot the dashboard is simply there — but tmux sessions are not: recreate each with `cockpit go <project>`, and resume a project's Claude conversation with `claude --continue` in its agent tab.
 
+## Remote access (phone / iPad)
+
+By default the dashboard binds `127.0.0.1` and is unreachable from other devices. `cockpit dash --host <tailscale-ip>` binds it to your private [Tailscale](https://tailscale.com) network and enforces bearer-token auth on every request (token persisted at `~/.project-cockpit/token`; open the printed `?token=…` URL once on the phone and a 30-day cookie takes over). Full setup — including driving live agent sessions over SSH + tmux from an iPad — in [docs/remote-access.md](docs/remote-access.md). Never expose the dashboard to the raw internet.
+
 ## Data
 
 - **Registry:** `~/.project-cockpit/registry.yml` — a list of project root paths. That's all the global state.
 - **Per-repo config:** `.project-cockpit.yml` at the repo root (template: `foundation/templates/common/.project-cockpit.yml`). Optional — without it, cockpit degrades to git + tmux info with the folder name as the slug.
 - **Audit log:** `~/.project-cockpit/audit.log` — append-only TSV: timestamp, project, action, tier, result.
+- **Dashboard token:** `~/.project-cockpit/token` (0600) — bearer token for non-localhost binds, created on first `--host` use. Delete it to rotate.
 
 ## Safety tiers (enforced, not advisory)
 

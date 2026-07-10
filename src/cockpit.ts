@@ -224,9 +224,14 @@ async function cmdRun(query: string, actionName?: string): Promise<void> {
 const LAUNCH_LABEL = "com.project-cockpit.dash";
 const PLIST_PATH = join(process.env.HOME ?? "~", "Library", "LaunchAgents", `${LAUNCH_LABEL}.plist`);
 
-function installLaunchAgent(port: number): void {
+function installLaunchAgent(port: number, host?: string): void {
   const serverPath = new URL("./server.ts", import.meta.url).pathname;
   const logPath = join(process.env.HOME ?? "~", ".project-cockpit", "dash.log");
+  // No token in the plist (it would be visible in `ps`/the plist file) — for
+  // non-loopback hosts the server reads/creates ~/.project-cockpit/token itself.
+  const hostArgs = host ? `
+    <string>--host</string>
+    <string>${host}</string>` : "";
   const plist = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
@@ -234,7 +239,7 @@ function installLaunchAgent(port: number): void {
   <key>ProgramArguments</key><array>
     <string>${process.execPath}</string>
     <string>${serverPath}</string>
-    <string>${port}</string>
+    <string>${port}</string>${hostArgs}
   </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
@@ -250,8 +255,11 @@ function installLaunchAgent(port: number): void {
   sh("launchctl", ["bootout", `gui/${uid}/${LAUNCH_LABEL}`]); // ignore failure (not loaded)
   const r = sh("launchctl", ["bootstrap", `gui/${uid}`, PLIST_PATH]);
   if (!r.ok) die(`launchctl bootstrap failed — try: launchctl bootstrap gui/${uid} ${PLIST_PATH}`);
-  console.log(`installed: dashboard now starts at login and stays up (port ${port})`);
+  console.log(`installed: dashboard now starts at login and stays up (port ${port}${host ? `, host ${host}` : ""})`);
   console.log(dim(`plist: ${PLIST_PATH}\nlogs:  ${logPath}\nremove with: cockpit dash --uninstall`));
+  if (host && !["127.0.0.1", "localhost", "::1"].includes(host)) {
+    console.log(dim(`non-loopback host: token auth is enforced — see the tokened URL in ${logPath}\nsetup guide: docs/remote-access.md`));
+  }
 }
 
 function uninstallLaunchAgent(): void {
@@ -280,7 +288,11 @@ function help(): void {
   cockpit open <project> <target>   ${OPEN_TARGETS.join(" | ")}
   cockpit run <project> <action>    run a declared action (tier-enforced, audited)
   cockpit dash [port]               start the dashboard (default http://localhost:4400)
-  cockpit dash --install            auto-start the dashboard at login (launchd)
+  cockpit dash --host <ip>          bind beyond localhost (e.g. a Tailscale IP);
+                                    enforces bearer-token auth — docs/remote-access.md
+  cockpit dash --token <t>          override the token (default: ~/.project-cockpit/token)
+  cockpit dash --install            auto-start the dashboard at login (launchd,
+                                    combines with --host)
   cockpit dash --uninstall          remove the login auto-start
   cockpit add [path]                register a project (default: cwd)
   cockpit audit                     print the audit log
@@ -307,11 +319,20 @@ switch (cmd) {
   case "run": await cmdRun(args[0] ?? die("usage: cockpit run <project> <action>"), args[1]); break;
   case "dash": {
     const port = Number(args.find((a) => /^\d+$/.test(a))) || 4400;
-    if (args.includes("--install")) { installLaunchAgent(port); break; }
+    const flagVal = (name: string) => {
+      const i = args.indexOf(name);
+      return i >= 0 ? args[i + 1] : undefined;
+    };
+    const host = flagVal("--host");
+    const token = flagVal("--token");
+    if (args.includes("--install")) { installLaunchAgent(port, host); break; }
     if (args.includes("--uninstall")) { uninstallLaunchAgent(); break; }
     const { startServer } = await import("./server.ts");
-    startServer(port);
-    if (process.stdout.isTTY) sh("open", [`http://localhost:${port}`]);
+    startServer(port, { host, token });
+    // Only auto-open when the plain localhost URL will actually work (no token
+    // in play) — otherwise the server has printed the tokened login URL.
+    const tokenInPlay = token || process.env.COCKPIT_TOKEN || (host && !["127.0.0.1", "localhost", "::1"].includes(host));
+    if (process.stdout.isTTY && !tokenInPlay) sh("open", [`http://localhost:${port}`]);
     break;
   }
   case "add": cmdAdd(args[0]); break;
