@@ -12,7 +12,7 @@
 
 ### Implementation queue
 
-- [ ] yes, open-source it (without breaking my cockpit) — from: Open-source it? (license, name check, publish where — see checklist below)?
+- [x] yes, open-source it (without breaking my cockpit) — from: Open-source it? (license, name check, publish where — see checklist below)? → public at github.com/earlyadopter/project-cockpit, MIT; local cockpit untouched (launchd dashboard + symlink verified running) (2026-07-16)
 - [x] yes, allow remote access, and document how to set it up for the users in the open-source project — from: Remote access: Tailscale + --host + token first, chat-bot bridge later?
 
 ### Plan as command center
