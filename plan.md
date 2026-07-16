@@ -49,7 +49,7 @@
 ### Launch & promotion (strategy: planning/marketing-positioning.md)
 
 - [x] demo GIF / 90s recording of the money loop (needs-you chip → what the agent asked → jump → plan decide → dispatch) at the top of the README — shares footage with the ai-foundation demo-asset ticket; record against the COCKPIT_DIR demo registry, not real projects → docs/demo.gif, 5 captioned scenes, 394 KB, staged demo world (decoy claude process + synthetic transcript), playwright-driven (2026-07-16)
-- [ ] launch essay "Ten projects, one attention span" on earlyadopterlabs.com — workflow as the story, cockpit as the proof; cross-post DEV/X
+- [ ] launch essay "Ten projects, one attention span" on earlyadopterlabs.com — workflow as the story, cockpit as the proof; cross-post DEV/X — draft ready (planning/launch-essay.md, incl. X-thread + DEV notes); remaining: owner review + publish to the site
 - [ ] Show HN post (title + first-comment skeleton drafted in the strategy doc); be present in comments all day
 - [ ] r/ClaudeAI + X thread same week, each natively reframed
 - [ ] README: friendly comparison note vs the island apps ("session axis vs project axis") + submit to relevant GitHub topics (claude-code, agent-monitoring)
