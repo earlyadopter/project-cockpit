@@ -439,7 +439,7 @@ switch (cmd) {
     const cc = forceCc || (!noCc && process.env.TERM_PROGRAM === "iTerm.app");
     const wIdx = args.findIndex((a) => a === "--window" || a === "-w");
     const window = wIdx >= 0 ? args[wIdx + 1] : undefined;
-    const rest = args.filter((a, i) => !["--cc", "-cc", "--no-cc", "--window", "-w"].includes(a) && i !== wIdx + 1);
+    const rest = args.filter((a, i) => !["--cc", "-cc", "--no-cc", "--window", "-w"].includes(a) && (wIdx < 0 || i !== wIdx + 1));
     await cmdGo(rest[0] ?? die("usage: cockpit go <project> [--cc|--no-cc] [-w <window>]"), cc, window);
     break;
   }
