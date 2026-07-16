@@ -873,6 +873,7 @@ async function submitAnswer(i) {
   const r = await fetch("/api/plan/answer", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ project: selected, question, answer }) });
   const dd = await r.json();
   if (!r.ok) { alert(dd.error || "failed"); if (btn) { btn.disabled = false; btn.textContent = "decide"; } return; }
+  if (input) input.value = ""; // clear so the don't-clobber-typing guard lets refresh re-render
   if (confirm((detailCache?.provider?.limited ? "⚠ Claude looks rate-limited right now (" + detailCache.provider.detail + ") — an implementation session may stall until it resets.\\n\\n" : "") + "Saved to plan.md: question checked with your answer, and a ticket added to '### Implementation queue'. Nothing is running yet.\\n\\nStart implementation NOW?\\n\\nOK — opens a live Claude Code session in " + selected + "'s tmux workspace (new 'impl' window), briefed with this decision. It starts working immediately; watch or steer it with: cockpit go " + selected + "\\n\\nCancel — leave it as a queued ticket. Start it later yourself: cockpit go " + selected + ", then in the agent tab ask Claude to work the Implementation queue in plan.md.")) {
     const ir = await fetch("/api/plan/implement", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ project: selected, question, answer }) });
     const id = await ir.json();

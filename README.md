@@ -4,7 +4,7 @@ A local project cockpit: one CLI + dashboard for working on many AI-assisted pro
 
 One binary, five verbs, no daemon, no cache — every call recomputes live state from `git`, `tmux`, and `lsof`.
 
-![The cockpit dashboard](docs/screenshot-dashboard.png)
+![Demo: attention chip → what the agent asked → decide → ticket queued](docs/demo.gif)
 
 ```
 cockpit list                      all projects, one status line each (attention first)
@@ -36,6 +36,8 @@ cockpit dash [port]               dashboard at http://localhost:4400 (Phase 2)
 The tabs organize; they don't automate. The two exceptions where the *cockpit* does the typing: actions declared with `window:` are sent into their tmux tab, and the dashboard's "start implementation" opens a fourth `impl` tab with Claude already running. The payoff is uniformity: same three drawers in every project, and closing the window throws away nothing.
 
 ## Dashboard (Phase 2 + 3)
+
+![The cockpit dashboard](docs/screenshot-dashboard.png)
 
 `cockpit dash` starts a web UI on `localhost:4400` and opens it in the browser: a project sidebar (needs-attention first) and per-project collapsible cards — Git, Workspace (tmux + ports), Deploy (date of the last push to origin's default branch — the "last PROD deploy" proxy for push-to-deploy projects), Recent commits, Changelog (auto-detected, or set `changelog:` in the repo config), and Actions. Light/dark follows the system. Refreshes every 10s; every request recomputes live state — stop and restart it freely, there is nothing to lose.
 
