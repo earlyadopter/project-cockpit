@@ -6,7 +6,7 @@
 - [x] Open-source it? (license, name check, publish where — see checklist below) → yes, open-source it (without breaking my cockpit) (decided 2026-07-09)
 - [x] Remote access: Tailscale + --host + token first, chat-bot bridge later? → yes, allow remote access, and document how to set it up for the users in the open-source project (decided 2026-07-09)
 - [x] Monetize? → no: stays open-source/free; credibility first, not a few extra dollars (decided 2026-07-16)
-- [ ] Marketing & positioning: how to promote the cockpit and articulate what problem it solves (multi-project AI-assisted work needs one attention surface; observe-only + server-side safety tiers as the differentiator vs Vibe Island / Ping Island)
+- [x] Marketing & positioning: how to promote the cockpit and articulate what problem it solves (multi-project AI-assisted work needs one attention surface; observe-only + server-side safety tiers as the differentiator vs Vibe Island / Ping Island) → position one level above the crowded session-monitor category ("mission control for a portfolio of AI-assisted projects"); attention/safety/plan.md as the three pillars; essay-then-Show-HN launch sequence — full strategy + copy drafts: planning/marketing-positioning.md (decided 2026-07-16)
 
 ## Features
 
@@ -45,6 +45,15 @@
 - [x] LICENSE (MIT) + README screenshots + install one-liner — screenshots from a COCKPIT_DIR demo registry, no real project data (2026-07-16)
 - [x] caveats section: macOS-only bits (open, launchd, iTerm2 -CC), agent detection is best-effort — plus trust model and reboot behavior (2026-07-16)
 - [x] create GitHub repo and publish → github.com/earlyadopter/project-cockpit, public (2026-07-16)
+
+### Launch & promotion (strategy: planning/marketing-positioning.md)
+
+- [ ] demo GIF / 90s recording of the money loop (needs-you chip → what the agent asked → jump → plan decide → dispatch) at the top of the README — shares footage with the ai-foundation demo-asset ticket; record against the COCKPIT_DIR demo registry, not real projects
+- [ ] launch essay "Ten projects, one attention span" on earlyadopterlabs.com — workflow as the story, cockpit as the proof; cross-post DEV/X
+- [ ] Show HN post (title + first-comment skeleton drafted in the strategy doc); be present in comments all day
+- [ ] r/ClaudeAI + X thread same week, each natively reframed
+- [ ] README: friendly comparison note vs the island apps ("session axis vs project axis") + submit to relevant GitHub topics (claude-code, agent-monitoring)
+- [ ] opportunistic: pitch the hooks integration as a Claude Code hooks case study wherever community tooling is showcased
 
 ### Remote access (Tier 1)
 
