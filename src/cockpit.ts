@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 // cockpit — CLI of the project cockpit (Phase 1 + Phase 2 `dash`).
-// Spec: planning/cockpit-design.md §4 §8, github.com/earlyadopter/ai-foundation/issues/10
+// Founding brief: planning/project-cockpit.md
 // Shared state layer: ./state.ts. Dashboard server: ./server.ts.
 
 import { existsSync, unlinkSync, writeFileSync } from "node:fs";
@@ -8,13 +8,16 @@ import { spawnSync } from "node:child_process";
 import { basename, join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import {
-  AUDIT_FILE, OPEN_TARGETS, REGISTRY_FILE,
+  AUDIT_FILE, EVENTS_FILE, OPEN_TARGETS, REGISTRY_FILE,
   type Project, type Tier,
-  agentState, allProjects, attentionItems, audit, claudeCwds, ensureSession, gitState, readFoundation,
+  accentColor, agentState, allProjects, attentionItems, audit, claudeCwds, ensureSession, focusWindow,
+  gitState, readFoundation,
   humanAge, loadProject, loadRegistry, localService, openTarget, planStats, portListening,
-  readPlan, saveRegistry, sendToWindow, sh, tmuxSessionAlive, tmuxWindows,
+  readPlan, recordAgentEvent, saveRegistry, sendToWindow, sh, shortAge, tmuxSessionAlive, tmuxWindows,
 } from "./state.ts";
 import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { fileURLToPath } from "node:url";
 
 // ---------- output helpers ----------
 const isTTY = !!process.stdout.isTTY;
@@ -56,12 +59,35 @@ function cmdAdd(pathArg?: string): void {
   saveRegistry(paths);
   const p = loadProject(root);
   console.log(`registered ${bold(p.name)} (${root})`);
-  if (!p.hasConfig) console.log(dim("hint: add a .project-cockpit.yml — template in ai-foundation/foundation/templates/common/"));
+  if (!p.hasConfig) {
+    console.log(dim(`hint: add a .project-cockpit.yml at the repo root to declare services and actions, e.g.
+  name: ${p.name}
+  focus: "what's in flight right now"
+  services: [{ name: dev, kind: local, url: "http://localhost:3000", port: 3000 }]
+  actions:
+    dev:  { cmd: "npm run dev", window: dev }
+    push: { cmd: "git push", tier: manual }
+(optional — without it you still get git + tmux; the dashboard can also create one for you)`));
+  }
 }
 
 async function cmdList(): Promise<void> {
   const projects = allProjects();
-  if (projects.length === 0) die("no projects registered — run `cockpit add <path>` first");
+  if (projects.length === 0) {
+    console.log(`${bold("cockpit")} — no projects registered yet.
+
+  Register your first project (a git repo, or any folder you work in):
+
+    cockpit add ~/projects/my-app     # or: cd into it and just \`cockpit add\`
+
+  Then:
+
+    cockpit list        this view — one live status line per project
+    cockpit go my-app   tmux workspace with dev / agent / shell windows
+    cockpit dash        the dashboard, at http://localhost:4400
+`);
+    return;
+  }
   const cwds = await claudeCwds();
   const rows = await Promise.all(projects.map(async (p) => {
     const svc = localService(p);
@@ -74,18 +100,29 @@ async function cmdList(): Promise<void> {
     const attention = attentionItems(p, git, agent, readPlan(p), readFoundation(p));
     return { p, git, session, devUp, agent, attention };
   }));
-  rows.sort((a, b) => (b.attention.length ? 1 : 0) - (a.attention.length ? 1 : 0) || a.p.name.localeCompare(b.p.name));
+  // needs-attention first; within those, the agent that has waited longest on top
+  const waitSec = (r: (typeof rows)[number]) => (r.agent.state === "waiting" ? r.agent.ageSec ?? 0 : -1);
+  rows.sort((a, b) =>
+    (b.attention.length ? 1 : 0) - (a.attention.length ? 1 : 0) ||
+    waitSec(b) - waitSec(a) ||
+    a.p.name.localeCompare(b.p.name));
   const nameW = Math.max(...rows.map((r) => r.p.name.length)) + 2;
   const branchW = Math.max(...rows.map((r) => (r.git.branch || "-").length)) + 2;
   for (const r of rows) {
     const dot = r.attention.length ? yellow("●") : green("●");
+    const mark = isTTY ? paint(`38;5;${accentColor(r.p).ansi256}`, "▪") + " " : "";
     const sess = r.session ? cyan("tmux") : dim("    ");
     const dev = r.devUp === null ? dim("     ") : r.devUp ? green(`:${localService(r.p)!.port}`) : dim(`:${localService(r.p)!.port}✗`);
-    const ag = r.agent.state === "working" ? cyan("agent✳")
-      : r.agent.state === "waiting" ? yellow("agent✋")
-      : r.agent.state === "idle" ? dim("agent…") : dim("      ");
+    const agRaw = r.agent.state === "working" ? "agent✳"
+      : r.agent.state === "waiting" ? `agent✋${shortAge(r.agent.ageSec)}`
+      : r.agent.state === "idle" ? "agent…" : "";
+    // pad the plain text BEFORE painting — ANSI escape lengths vary by color code
+    const agPad = agRaw.padEnd(11);
+    const ag = r.agent.state === "working" ? cyan(agPad)
+      : r.agent.state === "waiting" ? ((r.agent.ageSec ?? 0) >= 600 ? red(agPad) : yellow(agPad))
+      : dim(agPad);
     const att = r.attention.length ? yellow(r.attention.join(", ")) : dim("clean");
-    console.log(`${dot} ${bold(r.p.name.padEnd(nameW))}${(r.git.branch || "-").padEnd(branchW)}${sess}  ${dev.padEnd(isTTY ? 14 : 6)} ${ag.padEnd(isTTY ? 15 : 7)} ${att}`);
+    console.log(`${dot} ${mark}${bold(r.p.name.padEnd(nameW))}${(r.git.branch || "-").padEnd(branchW)}${sess}  ${dev.padEnd(isTTY ? 14 : 6)} ${ag} ${att}`);
   }
 }
 
@@ -120,7 +157,11 @@ async function cmdStatus(query: string): Promise<void> {
   const agentLabel = agent.state === "working" ? cyan("working ✳")
     : agent.state === "waiting" ? yellow("waiting for you ✋")
     : agent.state === "idle" ? dim("idle") : dim("none");
-  console.log(`\n  ${bold("agent")} ${agentLabel}${agent.state !== "none" ? dim(` — ${agent.detail}${agent.ageSec !== null ? `, last activity ${humanAge(agent.ageSec)}` : ""}${agent.procs > 1 ? `, ${agent.procs} instances` : ""}`) : ""}`);
+  console.log(`\n  ${bold("agent")} ${agentLabel}${agent.state !== "none" ? dim(` — ${agent.detail}${agent.ageSec !== null ? `, last activity ${humanAge(agent.ageSec)}` : ""}${agent.procs > 1 ? `, ${agent.procs} instances` : ""}${agent.source === "hook" ? ", via hook" : ""}`) : ""}`);
+  if (agent.state === "waiting" && agent.lastMessage) {
+    const msg = agent.lastMessage.replace(/\s+/g, " ").slice(0, 200);
+    console.log(dim(`        last said: “${msg}${agent.lastMessage.length > 200 ? "…" : ""}”`));
+  }
 
   if (plan) {
     const s = planStats(plan);
@@ -152,10 +193,15 @@ async function cmdStatus(query: string): Promise<void> {
   console.log();
 }
 
-async function cmdGo(query: string, cc = false): Promise<void> {
+async function cmdGo(query: string, cc = false, window?: string): Promise<void> {
   const p = findProject(query);
   const created = await ensureSession(p).catch((e) => die(String(e.message ?? e)));
-  audit(p.name, "go", "safe", created ? "session-created" : "session-existed");
+  if (window) {
+    const r = await focusWindow(p, window);
+    if (!r.ok) console.error(yellow(`cockpit: ${r.error}`));
+    else if (r.window !== window) console.error(dim(`no window "${window}" — focusing "${r.window}"`));
+  }
+  audit(p.name, "go", "safe", `${created ? "session-created" : "session-existed"}${window ? ` window=${window}` : ""}`);
   if (process.env.TMUX) {
     // already inside tmux — just jump; -CC can't nest
     spawnSync("tmux", ["switch-client", "-t", `=${p.name}`], { stdio: "inherit" });
@@ -269,6 +315,82 @@ function uninstallLaunchAgent(): void {
   console.log("uninstalled: dashboard no longer starts at login");
 }
 
+// ---------- Claude Code hooks (opt-in precise agent events) ----------
+// Installs Notification / Stop / UserPromptSubmit hooks into ~/.claude/settings.json.
+// Each fires `cockpit _hook-event`, which appends one JSON line to
+// ~/.project-cockpit/agent-events.log. Observe-only: hooks report, never drive.
+const CLAUDE_SETTINGS = join(homedir(), ".claude", "settings.json");
+const HOOK_EVENTS = ["Notification", "Stop", "UserPromptSubmit"];
+const HOOK_MARKER = "_hook-event";
+
+function hookCommand(): string {
+  // fileURLToPath, not .pathname — the latter percent-encodes spaces etc.,
+  // which would write a nonexistent path into settings.json (hook never fires)
+  const bin = fileURLToPath(new URL("../bin/cockpit", import.meta.url));
+  return `'${bin}' ${HOOK_MARKER}`;
+}
+
+function cmdHooks(args: string[]): void {
+  let settings: any = {};
+  if (existsSync(CLAUDE_SETTINGS)) {
+    try { settings = JSON.parse(readFileSync(CLAUDE_SETTINGS, "utf8")); }
+    catch (e) { die(`could not parse ${CLAUDE_SETTINGS} — fix it first (${e})`); }
+  }
+  const hasOurs = (ev: string) =>
+    (settings.hooks?.[ev] ?? []).some((h: any) => (h.hooks ?? []).some((x: any) => String(x.command ?? "").includes(HOOK_MARKER)));
+
+  if (args.includes("--install")) {
+    const missing = HOOK_EVENTS.filter((ev) => !hasOurs(ev));
+    if (missing.length === 0) { console.log("already installed — nothing to do"); return; }
+    // backup only when actually modifying — a repeat install must not clobber
+    // the pristine pre-cockpit backup with an already-hooked copy
+    if (existsSync(CLAUDE_SETTINGS)) writeFileSync(CLAUDE_SETTINGS + ".bak-cockpit", readFileSync(CLAUDE_SETTINGS));
+    settings.hooks ??= {};
+    let added = 0;
+    for (const ev of missing) {
+      settings.hooks[ev] ??= [];
+      settings.hooks[ev].push({ hooks: [{ type: "command", command: hookCommand() }] });
+      added++;
+    }
+    writeFileSync(CLAUDE_SETTINGS, JSON.stringify(settings, null, 2) + "\n");
+    console.log(added
+      ? `installed ${added} hook${added > 1 ? "s" : ""} (${HOOK_EVENTS.join(", ")}) in ${CLAUDE_SETTINGS}
+  events land in ${EVENTS_FILE}
+  backup of previous settings: ${CLAUDE_SETTINGS}.bak-cockpit
+  agent state now reads precise events instead of transcript heuristics (new sessions only)`
+      : "already installed — nothing to do");
+    return;
+  }
+
+  if (args.includes("--uninstall")) {
+    if (!settings.hooks) { console.log("no hooks installed"); return; }
+    for (const ev of HOOK_EVENTS) {
+      if (!settings.hooks[ev]) continue;
+      settings.hooks[ev] = settings.hooks[ev].filter((h: any) => !(h.hooks ?? []).some((x: any) => String(x.command ?? "").includes(HOOK_MARKER)));
+      if (settings.hooks[ev].length === 0) delete settings.hooks[ev];
+    }
+    if (Object.keys(settings.hooks).length === 0) delete settings.hooks;
+    writeFileSync(CLAUDE_SETTINGS, JSON.stringify(settings, null, 2) + "\n");
+    console.log(`removed cockpit hooks from ${CLAUDE_SETTINGS} — agent state falls back to heuristics`);
+    return;
+  }
+
+  const status = HOOK_EVENTS.map((ev) => `${hasOurs(ev) ? green("✓") : dim("✗")} ${ev}`).join("  ");
+  console.log(`cockpit hooks (precise agent events for the dashboard/CLI):\n  ${status}`);
+  console.log(dim(`  install with: cockpit hooks --install   (writes to ${CLAUDE_SETTINGS})`));
+  if (existsSync(EVENTS_FILE)) {
+    const tail = readFileSync(EVENTS_FILE, "utf8").trimEnd().split("\n").slice(-5);
+    console.log(dim(`  last events (${EVENTS_FILE}):`));
+    for (const l of tail) console.log(dim(`    ${l}`));
+  }
+}
+
+async function cmdHookEvent(): Promise<void> {
+  let raw = "";
+  for await (const chunk of process.stdin) raw += chunk;
+  recordAgentEvent(raw);
+}
+
 function cmdAudit(): void {
   if (!existsSync(AUDIT_FILE)) {
     console.log(dim("audit log is empty"));
@@ -285,8 +407,12 @@ function help(): void {
   cockpit go <project>              attach-or-create the project tmux session
                                     (native iTerm2 tabs by default in iTerm2;
                                      --no-cc for classic tmux UI, --cc to force)
+  cockpit go <project> -w <window>  land on a specific window (agent/impl/dev/…)
   cockpit open <project> <target>   ${OPEN_TARGETS.join(" | ")}
   cockpit run <project> <action>    run a declared action (tier-enforced, audited)
+  cockpit hooks [--install|--uninstall]
+                                    precise agent events via Claude Code hooks
+                                    (opt-in; without them detection is heuristic)
   cockpit dash [port]               start the dashboard (default http://localhost:4400)
   cockpit dash --host <ip>          bind beyond localhost (e.g. a Tailscale IP);
                                     enforces bearer-token auth — docs/remote-access.md
@@ -298,7 +424,7 @@ function help(): void {
   cockpit audit                     print the audit log
 
   registry: ${REGISTRY_FILE}
-  per-repo config: .project-cockpit.yml (template in ai-foundation)`);
+  per-repo config: .project-cockpit.yml (optional — minimal example in the README)`);
 }
 
 // ---------- main ----------
@@ -311,10 +437,14 @@ switch (cmd) {
     const forceCc = args.includes("--cc") || args.includes("-cc");
     const noCc = args.includes("--no-cc");
     const cc = forceCc || (!noCc && process.env.TERM_PROGRAM === "iTerm.app");
-    const rest = args.filter((a) => !["--cc", "-cc", "--no-cc"].includes(a));
-    await cmdGo(rest[0] ?? die("usage: cockpit go <project> [--cc|--no-cc]"), cc);
+    const wIdx = args.findIndex((a) => a === "--window" || a === "-w");
+    const window = wIdx >= 0 ? args[wIdx + 1] : undefined;
+    const rest = args.filter((a, i) => !["--cc", "-cc", "--no-cc", "--window", "-w"].includes(a) && i !== wIdx + 1);
+    await cmdGo(rest[0] ?? die("usage: cockpit go <project> [--cc|--no-cc] [-w <window>]"), cc, window);
     break;
   }
+  case "hooks": cmdHooks(args); break;
+  case "_hook-event": await cmdHookEvent(); break;
   case "open": cmdOpen(args[0] ?? die("usage: cockpit open <project> <target>"), args[1]); break;
   case "run": await cmdRun(args[0] ?? die("usage: cockpit run <project> <action>"), args[1]); break;
   case "dash": {

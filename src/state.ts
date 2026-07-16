@@ -9,9 +9,11 @@ import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { load as yamlLoad, dump as yamlDump } from "js-yaml";
 
-export const COCKPIT_DIR = join(homedir(), ".project-cockpit");
+// COCKPIT_DIR env var overrides the state directory (demos, tests, screenshots).
+export const COCKPIT_DIR = process.env.COCKPIT_DIR || join(homedir(), ".project-cockpit");
 export const REGISTRY_FILE = join(COCKPIT_DIR, "registry.yml");
 export const AUDIT_FILE = join(COCKPIT_DIR, "audit.log");
+export const EVENTS_FILE = join(COCKPIT_DIR, "agent-events.log");
 export const TMUX_WINDOWS = ["dev", "agent", "shell"];
 
 export type Tier = "safe" | "confirm" | "manual";
@@ -19,6 +21,7 @@ export interface ActionDef { cmd: string; tier?: Tier; window?: string }
 export interface Service { name?: string; kind?: string; url?: string; port?: number }
 export interface Config {
   name?: string; focus?: string; repo?: string; notes?: string; changelog?: string; plan?: string;
+  color?: string; icon?: string;
   services?: Service[]; env_files?: string[]; actions?: Record<string, ActionDef>;
 }
 export interface Project { root: string; name: string; cfg: Config; hasConfig: boolean }
@@ -164,7 +167,7 @@ export function readFoundation(p: Project): FoundationState | null {
 
 export function attentionItems(p: Project, git: GitState, agent?: AgentInfo, plan?: Plan | null, foundation?: FoundationState | null): string[] {
   const items: string[] = [];
-  if (agent?.state === "waiting") items.push("agent waiting for you");
+  if (agent?.state === "waiting") items.push(`agent waiting for you${agent.ageSec !== null ? ` · ${shortAge(agent.ageSec)}` : ""}`);
   if (foundation?.outdated) items.push(`foundation v${foundation.installed} → v${foundation.current} available`);
   if (plan) {
     const q = plan.direction.filter((d) => !d.done).length;
@@ -253,7 +256,9 @@ export interface AgentInfo {
   procs: number;
   state: AgentStateKind;
   detail: string;
-  ageSec: number | null; // seconds since last transcript write
+  ageSec: number | null; // seconds since last transcript write (or hook event)
+  lastMessage?: string | null; // last assistant text — what the agent said before waiting
+  source?: "hook" | "heuristic";
 }
 
 export async function claudeCwds(): Promise<Map<string, number>> {
@@ -291,6 +296,66 @@ function readLastBytes(file: string, bytes = 65536): string {
   }
 }
 
+// Last assistant text block in the transcript tail — when the agent is waiting,
+// this is the question/summary it left for the human.
+function lastAssistantText(file: string): string | null {
+  try {
+    const lines = readLastBytes(file).split("\n").filter(Boolean);
+    for (let i = lines.length - 1; i >= 0; i--) {
+      let e: any;
+      try { e = JSON.parse(lines[i]); } catch { continue; }
+      if (e?.type !== "assistant") continue;
+      const content = e.message?.content;
+      if (!Array.isArray(content)) continue;
+      const text = content.filter((b: any) => b?.type === "text" && b.text).map((b: any) => b.text).join(" ").trim();
+      if (text) return text.length > 280 ? text.slice(0, 280) + "…" : text;
+    }
+  } catch { /* unreadable — no excerpt */ }
+  return null;
+}
+
+// ---------- hook events (opt-in, `cockpit hooks --install`) ----------
+// Claude Code hooks append one JSON line per event; agentState() prefers these
+// over the transcript heuristics when they're fresher. Still observe-only:
+// hooks report, they never drive the agent.
+export interface AgentEvent { ts: string; event: string; cwd: string; session: string; message?: string }
+
+export function recordAgentEvent(rawStdin: string): void {
+  let e: any = {};
+  try { e = JSON.parse(rawStdin); } catch { /* record what we can */ }
+  const line = JSON.stringify({
+    ts: new Date().toISOString(),
+    event: e?.hook_event_name ?? "unknown",
+    cwd: e?.cwd ?? "",
+    session: e?.session_id ?? "",
+    ...(typeof e?.message === "string" ? { message: e.message.slice(0, 300) } : {}),
+  });
+  mkdirSync(COCKPIT_DIR, { recursive: true });
+  appendFileSync(EVENTS_FILE, line + "\n");
+  // keep the log bounded — it's a signal buffer, not history (audit.log is history)
+  try {
+    if (statSync(EVENTS_FILE).size > 512 * 1024) {
+      const lines = readFileSync(EVENTS_FILE, "utf8").trimEnd().split("\n");
+      writeFileSync(EVENTS_FILE, lines.slice(-1000).join("\n") + "\n");
+    }
+  } catch { /* rotation is best-effort */ }
+}
+
+export function lastAgentEvent(root: string): AgentEvent | null {
+  if (!existsSync(EVENTS_FILE)) return null;
+  try {
+    const key = root.replace(/\/$/, "");
+    const lines = readLastBytes(EVENTS_FILE).split("\n").filter(Boolean);
+    for (let i = lines.length - 1; i >= 0; i--) {
+      try {
+        const e = JSON.parse(lines[i]);
+        if ((e?.cwd ?? "").replace(/\/$/, "") === key) return e;
+      } catch { continue; }
+    }
+  } catch { /* unreadable — fall back to heuristics */ }
+  return null;
+}
+
 // Scan a transcript tail backwards for the last user/assistant message and
 // report whether the turn looks finished (assistant text with no tool_use).
 function lastTurnFinished(file: string): boolean | null {
@@ -324,12 +389,33 @@ export async function agentState(p: Project, cwds: Map<string, number>): Promise
   const ageSec = newest ? Math.max(0, Math.round((Date.now() - newest.mtime) / 1000)) : null;
 
   if (procs === 0) return { procs, state: "none", detail: "no Claude Code process", ageSec };
+
+  // Hook events (if installed) beat the heuristics — but only when the event is
+  // at least as fresh as the transcript, so an active turn still reads "working".
+  const ev = lastAgentEvent(p.root);
+  if (ev) {
+    const evMs = Date.parse(ev.ts);
+    if (!Number.isNaN(evMs) && (!newest || evMs >= newest.mtime - 2000)) {
+      const evAge = Math.max(0, Math.round((Date.now() - evMs) / 1000));
+      if (evAge <= 30 * 60) {
+        const lastMessage = newest ? lastAssistantText(newest.file) : null;
+        if (ev.event === "Notification")
+          return { procs, state: "waiting", detail: ev.message || "needs your attention", ageSec: evAge, lastMessage, source: "hook" };
+        if (ev.event === "Stop")
+          return { procs, state: "waiting", detail: "turn finished — waiting for your input", ageSec: evAge, lastMessage, source: "hook" };
+        if (ev.event === "UserPromptSubmit")
+          return { procs, state: "working", detail: "working on your prompt", ageSec: evAge, source: "hook" };
+      }
+    }
+  }
+
   if (ageSec === null) return { procs, state: "idle", detail: "process running, no transcript found", ageSec };
   if (ageSec > 30 * 60) return { procs, state: "idle", detail: "no activity for 30+ min", ageSec };
   if (ageSec < 45) return { procs, state: "working", detail: "actively writing", ageSec };
   const finished = lastTurnFinished(newest!.file);
-  if (finished === false) return { procs, state: "waiting", detail: "stalled mid-turn — possibly waiting for permission", ageSec };
-  return { procs, state: "waiting", detail: "turn finished — waiting for your input", ageSec };
+  const lastMessage = lastAssistantText(newest!.file);
+  if (finished === false) return { procs, state: "waiting", detail: "stalled mid-turn — possibly waiting for permission", ageSec, lastMessage, source: "heuristic" };
+  return { procs, state: "waiting", detail: "turn finished — waiting for your input", ageSec, lastMessage, source: "heuristic" };
 }
 
 export function humanAge(sec: number | null): string {
@@ -337,6 +423,92 @@ export function humanAge(sec: number | null): string {
   if (sec < 60) return `${sec}s ago`;
   if (sec < 3600) return `${Math.round(sec / 60)}m ago`;
   return `${Math.round(sec / 3600)}h ago`;
+}
+
+// Bare duration ("12m") — for chips where "ago" would just be noise.
+export function shortAge(sec: number | null): string {
+  if (sec === null) return "";
+  if (sec < 60) return `${sec}s`;
+  if (sec < 3600) return `${Math.round(sec / 60)}m`;
+  return `${Math.round(sec / 3600)}h`;
+}
+
+// Land the user in the exact tmux window that needs them: prefer an explicit
+// target, else the window actually running `claude`, else the usual suspects.
+// Focus-only — selects and raises, never starts or sends anything.
+export async function focusWindow(p: Project, window?: string): Promise<{ ok: boolean; window?: string; attached?: boolean; error?: string }> {
+  if (!(await tmuxSessionAlive(p.name)))
+    return { ok: false, error: `no tmux session "${p.name}" — start one with: cockpit go ${p.name}` };
+  const windows = await tmuxWindows(p.name);
+  let pick = window && windows.includes(window) ? window : undefined;
+  if (!pick) {
+    const panes = (await shA("tmux", ["list-panes", "-s", "-t", `=${p.name}`, "-F", "#{window_name}\t#{pane_current_command}"])).out;
+    pick = panes.split("\n").find((l) => /\tclaude$/.test(l))?.split("\t")[0];
+  }
+  if (!pick) pick = ["agent", "impl", "commit"].find((w) => windows.includes(w)) ?? windows[0];
+  if (!pick) return { ok: false, error: "session has no windows" };
+  sh("tmux", ["select-window", "-t", `=${p.name}:${pick}`]);
+  // In iTerm2 control mode the selected tmux window is a native tab — raising
+  // the app puts it in front. With no attached client there's nothing to raise.
+  const attached = (await shA("tmux", ["list-clients", "-t", `=${p.name}`, "-F", "#{client_name}"])).out !== "";
+  if (attached) sh("open", ["-a", "iTerm"]);
+  return { ok: true, window: pick, attached };
+}
+
+// ---------- provider status (best-effort, same caveats as agent detection) ----------
+// Claude Code writes API-error entries into the transcript when it hits a rate/
+// usage limit. Scan the tails of the newest transcripts; if nothing is readable
+// the feature silently disappears (foundation-chip precedent).
+export interface ProviderStatus { limited: boolean; detail: string }
+
+export function providerStatus(): ProviderStatus | null {
+  const projDir = join(homedir(), ".claude", "projects");
+  if (!existsSync(projDir)) return null;
+  const files: { file: string; mtime: number }[] = [];
+  try {
+    for (const d of readdirSync(projDir)) {
+      const dir = join(projDir, d);
+      let entries: string[] = [];
+      try { entries = readdirSync(dir); } catch { continue; }
+      for (const f of entries) {
+        if (!f.endsWith(".jsonl")) continue;
+        try { files.push({ file: join(dir, f), mtime: statSync(join(dir, f)).mtimeMs }); } catch { continue; }
+      }
+    }
+  } catch { return null; }
+  const recent = files.sort((a, b) => b.mtime - a.mtime).slice(0, 5)
+    .filter((f) => Date.now() - f.mtime < 6 * 3600 * 1000);
+  for (const f of recent) {
+    let tail = "";
+    try { tail = readLastBytes(f.file, 32768); } catch { continue; }
+    if (!/limit/i.test(tail)) continue;
+    for (const line of tail.split("\n").reverse()) {
+      if (!/limit/i.test(line)) continue;
+      let e: any;
+      try { e = JSON.parse(line); } catch { continue; }
+      const text = Array.isArray(e?.message?.content)
+        ? e.message.content.filter((b: any) => b?.type === "text").map((b: any) => b.text).join(" ")
+        : typeof e?.content === "string" ? e.content : "";
+      const m = text.match(/(usage limit|rate limit)[^.\n]{0,80}/i);
+      if (m && (e?.isApiErrorMessage || e?.type === "system")) {
+        return { limited: true, detail: m[0].trim() };
+      }
+    }
+  }
+  return { limited: false, detail: "" };
+}
+
+// Stable per-project accent — configured `color:` (hex) wins, else hash of name.
+// ANSI variant for the CLI is always hash-based (close enough for a glance).
+const ANSI_ACCENTS = [39, 42, 45, 75, 78, 81, 114, 141, 168, 171, 208, 214];
+export function accentColor(p: Project): { css: string; ansi256: number; icon: string } {
+  let hash = 0;
+  for (const ch of p.name) hash = (hash * 31 + (ch.codePointAt(0) ?? 0)) >>> 0;
+  const cfg = p.cfg.color;
+  const css = typeof cfg === "string" && /^#[0-9a-fA-F]{3,8}$/.test(cfg.trim())
+    ? cfg.trim() : `hsl(${hash % 360} 60% 52%)`;
+  const icon = typeof p.cfg.icon === "string" ? p.cfg.icon.trim().slice(0, 4) : "";
+  return { css, ansi256: ANSI_ACCENTS[hash % ANSI_ACCENTS.length], icon };
 }
 
 // ---------- actions & opening (shared by CLI and dashboard) ----------

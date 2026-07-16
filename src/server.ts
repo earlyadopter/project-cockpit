@@ -16,12 +16,12 @@ import { statSync } from "node:fs";
 import {
   type Project,
   COCKPIT_DIR,
-  agentState, allProjects, answerDirection, attentionItems, audit, claudeCwds, cleanForPrompt,
-  createConfigFromTemplate, discoverCandidates, findPlanningRefs, generateOptions,
+  accentColor, agentState, allProjects, answerDirection, attentionItems, audit, claudeCwds, cleanForPrompt,
+  createConfigFromTemplate, discoverCandidates, findPlanningRefs, focusWindow, generateOptions,
   foundationSource, gitState, humanAge, lastPush, loadProject, loadRegistry, localService, openTarget,
-  readFoundation,
+  providerStatus, readFoundation,
   planStats, portListening, readAudit, readChangelog, readPlan, recentCommits,
-  runInline, saveRegistry, sendToWindow, shA, startAgentTask, startImplementation,
+  runInline, saveRegistry, sendToWindow, shA, shortAge, startAgentTask, startImplementation,
   tmuxSessionAlive, tmuxWindows,
 } from "./state.ts";
 
@@ -35,11 +35,13 @@ async function projectSummary(p: Project, cwds: Awaited<ReturnType<typeof claude
   ]);
   const plan = readPlan(p);
   const foundation = readFoundation(p);
+  const accent = accentColor(p);
   return {
     name: p.name, root: p.root, focus: p.cfg.focus ?? "", branch: git.branch,
     dirty: git.dirty.length, ahead: git.ahead, behind: git.behind,
     session, devPort: svc?.port ?? null, devUp,
-    agent: { ...agent, age: humanAge(agent.ageSec) },
+    agent: { ...agent, age: humanAge(agent.ageSec), wait: shortAge(agent.ageSec) },
+    color: accent.css, icon: accent.icon,
     plan, planStats: plan ? planStats(plan) : null,
     foundation,
     attention: attentionItems(p, git, agent, plan, foundation),
@@ -62,6 +64,7 @@ async function projectDetail(p: Project) {
     })),
   );
   const changelog = readChangelog(p);
+  const provider = providerStatus();
   // Dirty paths that are submodules (gitlinks): a parent-repo commit cannot
   // include their inner changes — the UI must say so.
   const gitlinks = new Set(
@@ -78,7 +81,7 @@ async function projectDetail(p: Project) {
     lastCommit: git.lastCommit, lastCommitAge: git.lastCommitAge,
     hasUpstream: git.hasUpstream, hasRemote: git.hasRemote,
     dirtyFiles: git.dirty.slice(0, 20), dirtyTotal: git.dirty.length, submodulesDirty,
-    windows, lastPush: push, commits, services,
+    windows, lastPush: push, commits, services, provider,
     envFiles: (p.cfg.env_files ?? []).map((f) => ({ path: f, exists: existsSync(join(p.root, f)) })),
     actions: Object.entries(p.cfg.actions ?? {}).map(([name, a]) => ({
       name, cmd: a.cmd, tier: a.tier ?? "safe", window: a.window ?? null,
@@ -137,13 +140,13 @@ export function startServer(port = 4400, opts: ServerOpts = {}) {
         const authHdr = req.headers.get("authorization");
         const bearer = authHdr?.startsWith("Bearer ") ? authHdr.slice(7) : null;
         if (!tokenMatches(bearer, token) && !tokenMatches(cookieTok, token)) {
-          // One-time login URL: GET /?token=… sets the session cookie, then redirects
-          // to a clean / so the token doesn't linger in the address bar.
-          if (req.method === "GET" && url.pathname === "/" && tokenMatches(url.searchParams.get("token"), token)) {
+          // One-time login URL: GET /?token=… (or /focus?token=…) sets the session
+          // cookie, then redirects to a clean path so the token doesn't linger.
+          if (req.method === "GET" && ["/", "/focus"].includes(url.pathname) && tokenMatches(url.searchParams.get("token"), token)) {
             return new Response(null, {
               status: 303,
               headers: {
-                location: "/",
+                location: url.pathname,
                 "set-cookie": `cockpit_token=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000`,
               },
             });
@@ -167,7 +170,13 @@ export function startServer(port = 4400, opts: ServerOpts = {}) {
       if (req.method === "GET" && url.pathname === "/api/projects") {
         const cwds = await claudeCwds();
         const projects = await Promise.all(allProjects().map((p) => projectSummary(p, cwds)));
-        projects.sort((a, b) => (b.attention.length ? 1 : 0) - (a.attention.length ? 1 : 0) || a.name.localeCompare(b.name));
+        // needs-attention first; within those, longest-waiting agent on top —
+        // waiting time is the real cost signal when juggling many projects
+        const waitSec = (p: (typeof projects)[number]) => (p.agent.state === "waiting" ? p.agent.ageSec ?? 0 : -1);
+        projects.sort((a, b) =>
+          (b.attention.length ? 1 : 0) - (a.attention.length ? 1 : 0) ||
+          waitSec(b) - waitSec(a) ||
+          a.name.localeCompare(b.name));
         return json(projects);
       }
 
@@ -301,6 +310,18 @@ export function startServer(port = 4400, opts: ServerOpts = {}) {
         return json({ ok: true });
       }
 
+      // Focus-only: selects the tmux window that needs you and raises the
+      // terminal. Never starts or sends anything — the observe-only invariant.
+      if (req.method === "POST" && url.pathname === "/api/focus") {
+        const body = await req.json().catch(() => ({}));
+        const p = getProject(String(body.project ?? ""));
+        if (!p) return json({ error: "unknown project" }, 404);
+        const r = await focusWindow(p, body.window ? String(body.window) : undefined);
+        if (!r.ok) return json({ error: r.error }, 400);
+        audit(p.name, "focus", "safe", `window=${r.window}${r.attached ? "" : " (no attached client)"} [dash]`);
+        return json(r);
+      }
+
       if (req.method === "GET" && url.pathname === "/api/audit") {
         return new Response(readAudit(), { headers: { "content-type": "text/plain; charset=utf-8" } });
       }
@@ -343,6 +364,9 @@ export function startServer(port = 4400, opts: ServerOpts = {}) {
 
       if (req.method === "GET" && url.pathname === "/") {
         return new Response(PAGE, { headers: { "content-type": "text/html; charset=utf-8" } });
+      }
+      if (req.method === "GET" && url.pathname === "/focus") {
+        return new Response(FOCUS_PAGE, { headers: { "content-type": "text/html; charset=utf-8" } });
       }
       return new Response("not found", { status: 404 });
     },
@@ -405,6 +429,11 @@ const PAGE = `<!doctype html>
   .proj .sub { color: var(--ink-2); font-size: 12px; margin-left: 16px; }
   .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
   .dot.ok { background: var(--ok); } .dot.warn { background: var(--warn-ink); }
+  /* per-project accent — identity, not status (square so it can't be misread as a status dot) */
+  .pdot { width: 6px; height: 6px; border-radius: 2px; flex: none; display: inline-block; }
+  .attnbtn.hot { background: var(--bad-bg); color: var(--bad); }
+  .lastmsg { color: var(--ink-2); font-style: italic; margin-top: 4px; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; }
+  .quota { background: var(--bad-bg); color: var(--bad); border-radius: 999px; padding: 3px 12px; font-size: 12px; font-weight: 500; display: inline-block; margin: 6px 0 0; }
   /* status dot + short label — the only place semantic color is used as signal */
   .stat { display: inline-flex; align-items: center; gap: 6px; font-weight: 500; white-space: nowrap; }
   .sdot { width: 8px; height: 8px; border-radius: 50%; flex: none; display: inline-block; }
@@ -593,11 +622,13 @@ async function refresh() {
   projectsCache = await (await fetch("/api/projects")).json();
   if (!selected && projectsCache.length) selected = projectsCache[0].name;
   document.getElementById("side").innerHTML = projectsCache.map((p) => {
+    // waiting escalates with elapsed time: amber, then red past 10 minutes
+    const hot = p.agent.state === "waiting" && (p.agent.ageSec ?? 0) >= 600;
     const agent = p.agent.state === "working" ? ' · <span class="stat" style="font-size:12px"><span class="sdot ok"></span>agent</span>'
-      : p.agent.state === "waiting" ? ' · <span class="stat" style="font-size:12px;color:var(--warn-ink)"><span class="sdot warn"></span>needs you</span>' : "";
+      : p.agent.state === "waiting" ? \` · <span class="stat" style="font-size:12px;color:var(--\${hot ? "bad" : "warn-ink"})"><span class="sdot \${hot ? "bad" : "warn"}"></span>needs you\${p.agent.wait ? " · " + esc(p.agent.wait) : ""}</span>\` : "";
     return \`
     <button class="proj \${p.name === selected ? "sel" : ""}" onclick="pick('\${esc(p.name)}')">
-      <div class="nm"><span class="dot \${p.attention.length ? "warn" : "ok"}"></span>\${esc(p.name)}</div>
+      <div class="nm"><span class="dot \${p.attention.length ? "warn" : "ok"}"></span><span class="pdot" style="background:\${esc(p.color)}"></span>\${p.icon ? esc(p.icon) + " " : ""}\${esc(p.name)}</div>
       <div class="sub">\${esc(p.branch || "—")}\${p.session ? " · tmux" : ""}\${p.devUp ? " · :" + p.devPort : ""}\${agent}\${p.attention.length ? \` · <span style="color:var(--warn-ink)">\${p.attention.length} to review</span>\` : ""}</div>
     </button>\`;
   }).join("");
@@ -676,8 +707,9 @@ async function renderDetail() {
     \`<button onclick="openIn('finder')">Finder ↗</button>\`,
   ].filter(Boolean).join("");
 
+  const agentHot = d.agent.state === "waiting" && (d.agent.ageSec ?? 0) >= 600;
   const attn = d.attention.length
-    ? \`<div class="attn">\${d.attention.map((a, ai) => \`<button class="attnbtn" onclick="openFix(\${ai})">\${esc(a)}<span class="chev">›</span></button>\`).join("")}</div>\`
+    ? \`<div class="attn">\${d.attention.map((a, ai) => \`<button class="attnbtn \${agentHot && /^agent waiting/.test(a) ? "hot" : ""}" onclick="openFix(\${ai})">\${esc(a)}<span class="chev">›</span></button>\`).join("")}</div>\`
     : \`<div class="calm"><span class="sdot ok"></span>all clear</div>\`;
 
   const gitBody = d.branch ? \`<table>
@@ -686,9 +718,9 @@ async function renderDetail() {
       \${d.dirtyTotal ? \`<tr><td class="k">dirty (\${d.dirtyTotal})</td><td><pre>\${esc(d.dirtyFiles.map((l) => (d.submodulesDirty ?? []).includes(dirtyPath(l)) ? l + "   ← submodule (commit inside it)" : l).join("\\n"))}\${d.dirtyTotal > 20 ? "\\n…" : ""}</pre></td></tr>\` : \`<tr><td class="k">worktree</td><td><span class="stat"><span class="sdot ok"></span>clean</span></td></tr>\`}
     </table>\` : '<span class="mut">not a git repository</span>';
 
-  const agentMeta = [d.agent.age, d.agent.procs > 1 ? d.agent.procs + " sessions" : ""].filter(Boolean).join(" · ");
+  const agentMeta = [d.agent.age, d.agent.procs > 1 ? d.agent.procs + " sessions" : "", d.agent.source === "hook" ? "via hook" : ""].filter(Boolean).join(" · ");
   const agentHtml = d.agent.state === "working" ? \`<span class="stat" title="\${esc(d.agent.detail)}"><span class="sdot ok"></span>Working</span>\${agentMeta ? \` <span class="mut">· \${esc(agentMeta)}</span>\` : ""}\`
-    : d.agent.state === "waiting" ? \`<span class="stat" style="color:var(--warn-ink)" title="\${esc(d.agent.detail)}"><span class="sdot warn"></span>Waiting on you</span>\${agentMeta ? \` <span class="mut">· \${esc(agentMeta)}</span>\` : ""}\`
+    : d.agent.state === "waiting" ? \`<span class="stat" style="color:var(--\${agentHot ? "bad" : "warn-ink"})" title="\${esc(d.agent.detail)}"><span class="sdot \${agentHot ? "bad" : "warn"}"></span>Waiting on you</span>\${agentMeta ? \` <span class="mut">· \${esc(agentMeta)}</span>\` : ""} <button class="runbtn" onclick="focusAgent()">↦ jump to it</button>\${d.agent.lastMessage ? \`<div class="lastmsg" title="\${esc(d.agent.lastMessage)}">“\${esc(d.agent.lastMessage)}”</div>\` : ""}\`
     : d.agent.state === "idle" ? \`<span class="stat mut" title="\${esc(d.agent.detail)}"><span class="sdot mut"></span>Idle</span>\`
     : '<span class="mut">none</span>';
   const wsBody = \`<table>
@@ -767,8 +799,9 @@ async function renderDetail() {
   document.getElementById("main").innerHTML = \`
     <header>
       <div class="path mono">\${esc(d.root)}</div>
-      <h2>\${esc(d.name)}</h2>
+      <h2>\${d.icon ? esc(d.icon) + " " : ""}\${esc(d.name)}</h2>
       \${d.focus ? \`<p class="focus">\${esc(d.focus)}</p>\` : ""}
+      \${d.provider?.limited ? \`<span class="quota" title="best-effort, read from recent Claude Code transcripts">⚠ Claude \${esc(d.provider.detail)} — dispatched agents may stall</span>\` : ""}
       <div class="links">\${links}</div>
     </header>
     \${attn}
@@ -795,6 +828,8 @@ function paletteItems(q) {
   const items = [];
   for (const p of projectsCache) items.push({ label: p.name, k2: "switch to project", fn: () => pick(p.name) });
   if (detailCache) {
+    if (detailCache.agent?.state === "waiting")
+      items.push({ label: "jump to waiting agent", k2: detailCache.name, fn: () => focusAgent() });
     for (const t of ["cursor", "finder", "obsidian", "github", "deploy", "dev"])
       items.push({ label: \`open \${t}\`, k2: detailCache.name, fn: () => openIn(t) });
     for (const a of detailCache.actions ?? [])
@@ -838,7 +873,7 @@ async function submitAnswer(i) {
   const r = await fetch("/api/plan/answer", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ project: selected, question, answer }) });
   const dd = await r.json();
   if (!r.ok) { alert(dd.error || "failed"); if (btn) { btn.disabled = false; btn.textContent = "decide"; } return; }
-  if (confirm("Saved to plan.md: question checked with your answer, and a ticket added to '### Implementation queue'. Nothing is running yet.\\n\\nStart implementation NOW?\\n\\nOK — opens a live Claude Code session in " + selected + "'s tmux workspace (new 'impl' window), briefed with this decision. It starts working immediately; watch or steer it with: cockpit go " + selected + "\\n\\nCancel — leave it as a queued ticket. Start it later yourself: cockpit go " + selected + ", then in the agent tab ask Claude to work the Implementation queue in plan.md.")) {
+  if (confirm((detailCache?.provider?.limited ? "⚠ Claude looks rate-limited right now (" + detailCache.provider.detail + ") — an implementation session may stall until it resets.\\n\\n" : "") + "Saved to plan.md: question checked with your answer, and a ticket added to '### Implementation queue'. Nothing is running yet.\\n\\nStart implementation NOW?\\n\\nOK — opens a live Claude Code session in " + selected + "'s tmux workspace (new 'impl' window), briefed with this decision. It starts working immediately; watch or steer it with: cockpit go " + selected + "\\n\\nCancel — leave it as a queued ticket. Start it later yourself: cockpit go " + selected + ", then in the agent tab ask Claude to work the Implementation queue in plan.md.")) {
     const ir = await fetch("/api/plan/implement", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ project: selected, question, answer }) });
     const id = await ir.json();
     if (!ir.ok) alert(id.error || "failed to start implementation");
@@ -860,8 +895,12 @@ function openFix(i) {
   title.textContent = "▲ " + item;
   let html = "";
   if (/^agent waiting/.test(item)) {
-    html = \`<p>A Claude Code session in this project finished its turn — or is stalled at a permission prompt. This one is genuinely yours: it needs your reply, so there is nothing safe to automate.</p>
-      <p><strong>Go to it:</strong></p>\${fixCmdHtml("cockpit go " + d.name)}
+    html = \`<p>A Claude Code session in this project \${esc(d.agent.detail || "needs your reply")}\${d.agent.age ? " (" + esc(d.agent.age) + ")" : ""}. This one is genuinely yours: it needs your reply, so there is nothing safe to automate.</p>
+      \${d.agent.lastMessage ? \`<p><strong>It last said:</strong></p><pre>\${esc(d.agent.lastMessage)}</pre>\` : ""}
+      <p><button class="runbtn" onclick="focusAgent()">↦ jump to its terminal</button>
+      <span class="mut">— selects the exact tmux window and raises iTerm2. Focus only, nothing runs.</span></p>
+      <div id="fixout"></div>
+      <p><strong>Or go yourself:</strong></p>\${fixCmdHtml("cockpit go " + d.name)}
       <p class="mut">Then check the <b>agent</b> (or <b>impl</b>/<b>commit</b>) tab. Resume a closed conversation with <code>claude --continue</code>.</p>\`;
   } else if (/uncommitted$/.test(item)) {
     const subs = d.submodulesDirty ?? [];
@@ -926,6 +965,17 @@ async function fixConfig() {
   closeFix();
   refresh();
 }
+async function focusAgent(win) {
+  const r = await fetch("/api/focus", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ project: selected, window: win }) });
+  const d = await r.json();
+  if (!r.ok) { (document.getElementById("fixout") ? setFixOut("✗ " + (d.error || "failed"), "") : alert(d.error || "failed")); return; }
+  if (!d.attached) {
+    const msg = 'tmux window "' + d.window + '" selected — no terminal attached. Attach with: cockpit go ' + selected;
+    document.getElementById("fixout") ? setFixOut(msg, "") : alert(msg);
+  } else if (document.getElementById("fixout")) {
+    setFixOut('✓ focused tmux window "' + d.window + '" — check iTerm2', "");
+  }
+}
 async function fixCommitAgent() {
   if (!confirm("Open a Claude Code session in " + selected + "'s tmux (new 'commit' window) to review and commit the changes? It will not push.")) return;
   const r = await fetch("/api/fix/commit-agent", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ project: selected }) });
@@ -938,7 +988,8 @@ async function fixCommitAgent() {
 async function workTicket(i) {
   const t = (window._planTickets ?? [])[i];
   if (!t) return;
-  if (!confirm("Start implementing this ticket?\\n\\n  " + t.text + "\\n  (feature: " + t.feature + ")\\n\\nOpens an attended Claude Code session in " + selected + "'s tmux 'impl' window, briefed with this ticket. It will check the box in plan.md when done. It will not push.")) return;
+  const quotaWarn = detailCache?.provider?.limited ? "⚠ Claude looks rate-limited right now (" + detailCache.provider.detail + ") — the session may stall until it resets.\\n\\n" : "";
+  if (!confirm(quotaWarn + "Start implementing this ticket?\\n\\n  " + t.text + "\\n  (feature: " + t.feature + ")\\n\\nOpens an attended Claude Code session in " + selected + "'s tmux 'impl' window, briefed with this ticket. It will check the box in plan.md when done. It will not push.")) return;
   const r = await fetch("/api/plan/work", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ project: selected, feature: t.feature, ticket: t.text }) });
   const d = await r.json();
   if (!r.ok) { alert(d.error || "failed"); return; }
@@ -1064,6 +1115,71 @@ setInterval(() => {
   if (s > 25) el.style.color = "var(--warn-ink)"; else el.style.color = "";
 }, 1000);
 
+refresh();
+setInterval(refresh, 10000);
+</script>
+</body>
+</html>`;
+
+// /focus — attention-only compact view: nearly nothing when all is quiet,
+// one row per project that needs you. Sized for an always-on-top sliver of a
+// browser window or a phone home-screen bookmark over Tailscale.
+const FOCUS_PAGE = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cockpit · focus</title>
+<style>
+  :root {
+    --bg: #f4f3f0; --surface: #fff; --line: rgba(26,32,41,.09);
+    --ink: #1a2029; --ink-2: #5b6572; --ink-3: #8a93a0; --accent: #2563eb;
+    --ok: #177a3b; --warn-ink: #8a5a00; --warn-bg: #f9efd8; --bad: #b42318; --bad-bg: #fdecea;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #12161b; --surface: #1c222a; --line: rgba(232,236,241,.09);
+      --ink: #e8ecf1; --ink-2: #a6b0bc; --ink-3: #6f7a87; --accent: #6ea8fe;
+      --ok: #4ade80; --warn-ink: #f2c94c; --warn-bg: rgba(242,201,76,.13); --bad: #f87171; --bad-bg: rgba(248,113,113,.13);
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 13px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-variant-numeric: tabular-nums; background: var(--bg); color: var(--ink); padding: 10px; }
+  .row { display: flex; align-items: center; gap: 9px; background: var(--surface); border-radius: 10px; padding: 9px 12px; margin-bottom: 8px; min-width: 0; }
+  .pdot { width: 6px; height: 6px; border-radius: 2px; flex: none; }
+  .nm { font-weight: 600; flex: none; }
+  .why { flex: 1; min-width: 0; color: var(--warn-ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 12px; }
+  .why.hot { color: var(--bad); }
+  .jump { font: 12px inherit; border: 1px solid var(--line); background: none; color: var(--accent); border-radius: 7px; padding: 2px 10px; cursor: pointer; flex: none; }
+  .quiet { color: var(--ink-3); text-align: center; padding: 30px 10px; }
+  .quiet .big { font-size: 26px; }
+  footer { color: var(--ink-3); font-size: 11px; text-align: center; margin-top: 6px; }
+  footer a { color: var(--accent); text-decoration: none; }
+</style>
+</head>
+<body>
+<div id="list"><div class="quiet">loading…</div></div>
+<footer><a href="/">full dashboard</a> · <span id="fresh"></span></footer>
+<script>
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;" }[c]));
+async function jump(name) {
+  const r = await fetch("/api/focus", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ project: name }) });
+  const d = await r.json();
+  if (!r.ok) alert(d.error || "failed");
+  else if (!d.attached) alert('tmux window "' + d.window + '" selected — attach with: cockpit go ' + name);
+}
+async function refresh() {
+  const projects = await (await fetch("/api/projects")).json();
+  const need = projects.filter((p) => p.attention.length);
+  document.getElementById("list").innerHTML = need.length
+    ? need.map((p) => {
+        const hot = p.agent.state === "waiting" && (p.agent.ageSec ?? 0) >= 600;
+        const why = p.attention.join(" · ");
+        return \`<div class="row"><span class="pdot" style="background:\${esc(p.color)}"></span><span class="nm">\${p.icon ? esc(p.icon) + " " : ""}\${esc(p.name)}</span><span class="why \${hot ? "hot" : ""}" title="\${esc(why)}">\${esc(why)}</span>\${p.agent.state === "waiting" ? \`<button class="jump" onclick="jump('\${esc(p.name)}')">↦ jump</button>\` : ""}</div>\`;
+      }).join("")
+    : '<div class="quiet"><div class="big">✓</div>all quiet — nothing needs you</div>';
+  document.getElementById("fresh").textContent = "updated " + new Date().toLocaleTimeString();
+}
 refresh();
 setInterval(refresh, 10000);
 </script>

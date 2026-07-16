@@ -16,6 +16,7 @@ cockpit go <project>              attach-or-create the project's tmux session (d
 cockpit open <project> <target>   cursor | obsidian | finder | github | deploy | dev
 cockpit run <project> <action>    run a declared action — tier-enforced, audit-logged
 cockpit add [path]                register a project (default: cwd)
+cockpit hooks [--install]         precise agent events via Claude Code hooks (opt-in)
 cockpit audit                     print the audit log
 cockpit dash [port]               dashboard at http://localhost:4400 (Phase 2)
 ```
@@ -77,6 +78,22 @@ The cockpit detects Claude Code activity per project — best-effort, from two l
 
 Shown in `cockpit list` (agent✳ / agent✋ column), `cockpit status`, the dashboard sidebar, and the Workspace card. Heuristic by design — it reads undocumented traces and is never load-bearing: the cockpit still only *observes* agents, never drives them.
 
+**Waiting escalates with time.** A waiting agent shows its elapsed wait everywhere (`agent✋12m`, "needs you · 12m") and turns from amber to red past 10 minutes; needs-attention projects sort longest-waiting first. The dashboard also shows **what the agent last said** — the question or summary it left before going quiet — in the Workspace card, the waiting-chip popup, and `cockpit status`, so you can often decide from the dashboard whether it's worth switching context.
+
+**Jump to the agent.** The waiting chip's popup (and `⌘K` → "jump to waiting agent") has a *jump to its terminal* button: the server selects the exact tmux window running `claude` (`tmux select-window`) and raises iTerm2. Focus only — it never types, sends, or starts anything. Same from the CLI: `cockpit go <project> -w agent` (or any window name).
+
+**Precise events via hooks (opt-in).** `cockpit hooks --install` adds three Claude Code hooks (`Notification`, `Stop`, `UserPromptSubmit`) to `~/.claude/settings.json` — additive, existing hooks untouched, backup written, `cockpit hooks --uninstall` reverts. Each event appends one JSON line to `~/.project-cockpit/agent-events.log` (size-capped); `agentState()` prefers a fresh hook event over the heuristics, so "possibly waiting for permission" becomes the actual notification text (e.g. "Claude needs your permission to use Bash"). Hooks *report* — they never drive the agent. Without them everything above still works heuristically.
+
+**Provider limit visibility (best-effort).** If recent transcripts show a Claude usage/rate-limit error, the dashboard shows a warning pill on the project header and warns before dispatching an implementation session (which would otherwise stall confusingly). Same undocumented-trace caveat as the rest of Phase 4; unreadable → the feature silently disappears.
+
+## Focus view (`/focus`)
+
+`http://localhost:4400/focus` is the attention-only slice of the dashboard: one row per project that needs you (accent dot, name, why, elapsed wait, a jump button for waiting agents) and literally nothing else — "all quiet" when nothing needs you. Sized for a narrow always-on-top browser window next to your editor, or a phone home-screen bookmark over Tailscale (same auth: the `?token=…` login URL works on `/focus` too). Same 10s live recompute as the main page.
+
+## Per-project accent
+
+Every project gets a stable accent color (hash of its name) shown as a small square in the dashboard sidebar, the `/focus` view, and `cockpit list`. Override with `color: "#7c3aed"` in `.project-cockpit.yml`; an optional `icon: "🚂"` prefixes the project name in the dashboard. Identity, not status — the semantic green/amber dots are unchanged.
+
 ## Install
 
 Requires [bun](https://bun.sh) (runs the TypeScript directly — no build step) and tmux.
@@ -98,6 +115,7 @@ By default the dashboard binds `127.0.0.1` and is unreachable from other devices
 - **Registry:** `~/.project-cockpit/registry.yml` — a list of project root paths. That's all the global state.
 - **Per-repo config:** `.project-cockpit.yml` at the repo root (template: `foundation/templates/common/.project-cockpit.yml`). Optional — without it, cockpit degrades to git + tmux info with the folder name as the slug.
 - **Audit log:** `~/.project-cockpit/audit.log` — append-only TSV: timestamp, project, action, tier, result.
+- **Agent events:** `~/.project-cockpit/agent-events.log` — one JSON line per Claude Code hook event (only with `cockpit hooks --install`); size-capped signal buffer, not history.
 - **Dashboard token:** `~/.project-cockpit/token` (0600) — bearer token for non-localhost binds, created on first `--host` use. Delete it to rotate.
 
 ## Safety tiers (enforced, not advisory)

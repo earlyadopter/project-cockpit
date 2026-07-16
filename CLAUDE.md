@@ -48,9 +48,10 @@ Read and follow the rules in `.ai/rules/`. Key rules:
 ## Project-specific instructions
 
 ### Architecture invariants
-- **Never cache live state.** Every request/command recomputes from `git`, `tmux`, `lsof`, and the filesystem. The only persistent state: `~/.project-cockpit/registry.yml` (project paths), `audit.log` (append-only), and `token` (dashboard bearer token, 0600).
+- **Never cache live state.** Every request/command recomputes from `git`, `tmux`, `lsof`, and the filesystem. The only persistent state: `~/.project-cockpit/registry.yml` (project paths), `audit.log` (append-only), `agent-events.log` (hook-event signal buffer, size-capped), and `token` (dashboard bearer token, 0600).
 - **Safety tiers are enforced server-side** (`safe` runs, `confirm` requires explicit acknowledgment, `manual` is always refused with a copy-paste command). Never let a UI change weaken this.
 - **plan.md edits are surgical single-line changes** — never reorder or rewrite the file.
 - The dashboard binds `127.0.0.1` by default and rejects cross-origin non-GET. Any non-loopback bind (`--host`) must keep enforcing bearer-token auth on every request (`docs/remote-access.md`); never let a change weaken that or default the bind wider.
 - Runs under launchd (`cockpit dash --install`); after moving code, reinstall the agent.
-- The cockpit **observes** Claude Code sessions (process cwd + transcript traces, best-effort heuristics); the only agent-starting path is the explicit "start implementation" flow.
+- The cockpit **observes** Claude Code sessions (process cwd + transcript traces, best-effort heuristics; opt-in `cockpit hooks --install` upgrades to precise hook events — hooks report, never drive); the only agent-starting path is the explicit "start implementation" flow. Focus/jump features select tmux windows and raise iTerm2 but never type into them.
+- **No sounds, ever.** Audio features are vetoed by the owner — attention signals stay visual.
