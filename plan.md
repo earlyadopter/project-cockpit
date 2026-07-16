@@ -41,10 +41,10 @@
 ### Open-sourcing polish
 
 - [ ] first-run empty state: welcome card on dashboard + friendly `cockpit list` when registry is empty
-- [ ] genericize the 3 ai-foundation references in hint strings (inline a minimal config example)
-- [ ] LICENSE (MIT) + README screenshots + install one-liner
-- [ ] caveats section: macOS-only bits (open, launchd, iTerm2 -CC), agent detection is best-effort
-- [ ] create GitHub repo and publish
+- [x] genericize the 3 ai-foundation references in hint strings (inline a minimal config example) (2026-07-16)
+- [x] LICENSE (MIT) + README screenshots + install one-liner — screenshots from a COCKPIT_DIR demo registry, no real project data (2026-07-16)
+- [x] caveats section: macOS-only bits (open, launchd, iTerm2 -CC), agent detection is best-effort — plus trust model and reboot behavior (2026-07-16)
+- [x] create GitHub repo and publish → github.com/earlyadopter/project-cockpit, public (2026-07-16)
 
 ### Remote access (Tier 1)
 
@@ -71,7 +71,7 @@
 - [x] per-project accent color/icon: optional `color:`/`icon:` in .project-cockpit.yml, hash-of-name fallback, dot in sidebar + `cockpit list` (idea 9) (2026-07-16)
 - [ ] follow-up: escalation thresholds (10m amber→red) hardcoded — make configurable if they prove wrong in practice
 - [ ] follow-up: hook ingress covers Claude Code only — Ping Island also ingests Gemini/Codex; add if those enter the workflow
-- [ ] follow-up: dashboard screenshot refresh in README once the new UI settles (accent dots, /focus view)
+- [x] follow-up: dashboard screenshot refresh in README once the new UI settles (accent dots, /focus view) (2026-07-16)
 
 ### Dashboard redesign (design notes 2026-07-10)
 

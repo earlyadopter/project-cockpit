@@ -4,6 +4,8 @@ A local project cockpit: one CLI + dashboard for working on many AI-assisted pro
 
 One binary, five verbs, no daemon, no cache — every call recomputes live state from `git`, `tmux`, and `lsof`.
 
+![The cockpit dashboard](docs/screenshot-dashboard.png)
+
 ```
 cockpit list                      all projects, one status line each (attention first)
 cockpit status <project>          git, tmux, services, env files, actions
@@ -90,6 +92,8 @@ Shown in `cockpit list` (agent✳ / agent✋ column), `cockpit status`, the dash
 
 `http://localhost:4400/focus` is the attention-only slice of the dashboard: one row per project that needs you (accent dot, name, why, elapsed wait, a jump button for waiting agents) and literally nothing else — "all quiet" when nothing needs you. Sized for a narrow always-on-top browser window next to your editor, or a phone home-screen bookmark over Tailscale (same auth: the `?token=…` login URL works on `/focus` too). Same 10s live recompute as the main page.
 
+![The /focus view](docs/screenshot-focus.png)
+
 ## Per-project accent
 
 Every project gets a stable accent color (hash of its name) shown as a small square in the dashboard sidebar, the `/focus` view, and `cockpit list`. Override with `color: "#7c3aed"` in `.project-cockpit.yml`; an optional `icon: "🚂"` prefixes the project name in the dashboard. Identity, not status — the semantic green/amber dots are unchanged.
@@ -99,9 +103,15 @@ Every project gets a stable accent color (hash of its name) shown as a small squ
 Requires [bun](https://bun.sh) (runs the TypeScript directly — no build step) and tmux.
 
 ```bash
-cd cockpit && bun install
-ln -sf "$PWD/bin/cockpit" ~/.local/bin/cockpit
-cockpit dash --install   # optional: dashboard auto-starts at login and self-restarts (launchd)
+git clone https://github.com/earlyadopter/project-cockpit.git && cd project-cockpit && bun install && ln -sf "$PWD/bin/cockpit" ~/.local/bin/cockpit
+```
+
+Then register a project and go:
+
+```bash
+cockpit add ~/projects/my-app
+cockpit dash             # dashboard at http://localhost:4400
+cockpit dash --install   # optional: auto-start at login and self-restart (launchd)
 ```
 
 `--install` writes `~/Library/LaunchAgents/com.project-cockpit.dash.plist` (RunAtLoad + KeepAlive, PATH including Homebrew/bun so tmux detection works; logs at `~/.project-cockpit/dash.log`). Remove with `cockpit dash --uninstall`. After a reboot the dashboard is simply there — but tmux sessions are not: recreate each with `cockpit go <project>`, and resume a project's Claude conversation with `claude --continue` in its agent tab.
@@ -129,3 +139,13 @@ Actions with a `window:` key are sent to that tmux window (e.g. long-running dev
 ## Actionable attention chips
 
 Every attention chip is a button. Clicking opens a popup that explains the situation and offers the safest available remedy: **auto-fix** where harmless (`pull --ff-only` behind-remote, create a missing config from template), **agent-fix** where judgment helps (uncommitted changes → an attended Claude session in a tmux `commit` window that groups and commits, never pushes), **copyable commands** where your safety model says manual-only (push, set-upstream), and **guidance** where it's genuinely your turn (agent waiting for you). All fixes are audit-logged (`fix:*`).
+
+## Caveats
+
+Built for one specific desk; know the assumptions before adopting:
+
+- **macOS-only bits.** `cockpit open`/link buttons use macOS `open`; auto-start uses launchd (`~/Library/LaunchAgents`); "jump to agent" raises **iTerm2** specifically; `cockpit go` defaults to iTerm2 tmux control mode (`-CC`). The core (CLI status, dashboard, actions, plan card) is plain tmux + git and should travel, but no other platform is tested.
+- **Agent detection is best-effort by design.** The heuristics read undocumented Claude Code traces (process cwd via `ps`/`lsof`, transcript files under `~/.claude/projects/`) that can change without notice. `cockpit hooks --install` upgrades accuracy via documented hook events, but states are advisory either way — never load-bearing. Only Claude Code is detected; other agents are invisible.
+- **Trust model: single user, local machine.** The dashboard executes declared actions in your projects. It binds `127.0.0.1` by default, rejects cross-origin non-GET, and enforces a bearer token on any wider bind — but there is no multi-user story, no HTTPS, no sandboxing beyond the tier model. Tailscale is the only recommended remote path; never expose it to the raw internet.
+- **tmux is the workspace model.** No tmux, no `go`/window actions/focus return — the status views still work.
+- **Sessions don't survive reboots** (by design — the registry and audit log do). After a reboot, `cockpit go` recreates workspaces empty; resume Claude conversations with `claude --continue`.
