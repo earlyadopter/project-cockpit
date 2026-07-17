@@ -52,7 +52,7 @@
 - [ ] launch essay "Ten projects, one attention span" on earlyadopterlabs.com — workflow as the story, cockpit as the proof; cross-post DEV/X — draft ready (planning/launch-essay.md, incl. X-thread + DEV notes); remaining: owner review + publish to the site
 - [ ] Show HN post (title + first-comment skeleton drafted in the strategy doc); be present in comments all day
 - [ ] r/ClaudeAI + X thread same week, each natively reframed
-- [ ] README: friendly comparison note vs the session-monitor apps ("session axis vs project axis") + submit to relevant GitHub topics (claude-code, agent-monitoring)
+- [x] README: friendly comparison note vs the session-monitor apps ("session axis vs project axis") + submit to relevant GitHub topics (claude-code, agent-monitoring) → "Where it sits" section + 7 repo topics (2026-07-17)
 - [ ] opportunistic: pitch the hooks integration as a Claude Code hooks case study wherever community tooling is showcased
 
 ### Remote access (Tier 1)
