@@ -1,2 +1,5 @@
 node_modules/
 .DS_Store
+# working planning docs stay local — public design record lives in docs/vision.md
+planning/
+.obsidian/

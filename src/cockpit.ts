@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 // cockpit — CLI of the project cockpit (Phase 1 + Phase 2 `dash`).
-// Founding brief: planning/project-cockpit.md
+// Vision & design record: docs/vision.md
 // Shared state layer: ./state.ts. Dashboard server: ./server.ts.
 
 import { existsSync, unlinkSync, writeFileSync } from "node:fs";

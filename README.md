@@ -1,6 +1,6 @@
 # cockpit
 
-A local project cockpit: one CLI + dashboard for working on many AI-assisted projects at once — live status, named recoverable workspaces, tiered safe actions, agent visibility, and a per-project plan. Founding brief: [planning/project-cockpit.md](planning/project-cockpit.md).
+A local project cockpit: one CLI + dashboard for working on many AI-assisted projects at once — live status, named recoverable workspaces, tiered safe actions, agent visibility, and a per-project plan. Why it's shaped this way: [docs/vision.md](docs/vision.md).
 
 One binary, five verbs, no daemon, no cache — every call recomputes live state from `git`, `tmux`, and `lsof`.
 

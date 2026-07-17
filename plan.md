@@ -6,7 +6,7 @@
 - [x] Open-source it? (license, name check, publish where — see checklist below) → yes, open-source it (without breaking my cockpit) (decided 2026-07-09)
 - [x] Remote access: Tailscale + --host + token first, chat-bot bridge later? → yes, allow remote access, and document how to set it up for the users in the open-source project (decided 2026-07-09)
 - [x] Monetize? → no: stays open-source/free; credibility first, not a few extra dollars (decided 2026-07-16)
-- [x] Marketing & positioning: how to promote the cockpit and articulate what problem it solves (multi-project AI-assisted work needs one attention surface; observe-only + server-side safety tiers as the differentiator vs Vibe Island / Ping Island) → position one level above the crowded session-monitor category ("mission control for a portfolio of AI-assisted projects"); attention/safety/plan.md as the three pillars; essay-then-Show-HN launch sequence — full strategy + copy drafts: planning/marketing-positioning.md (decided 2026-07-16)
+- [x] Marketing & positioning: how to promote the cockpit and articulate what problem it solves (multi-project AI-assisted work needs one attention surface; observe-only + server-side safety tiers as the differentiator vs the notch session monitors) → position one level above the crowded session-monitor category ("mission control for a portfolio of AI-assisted projects"); attention/safety/plan.md as the three pillars; essay-then-Show-HN launch sequence — full strategy + copy drafts: planning/marketing-positioning.md (decided 2026-07-16)
 
 ## Features
 
@@ -52,7 +52,7 @@
 - [ ] launch essay "Ten projects, one attention span" on earlyadopterlabs.com — workflow as the story, cockpit as the proof; cross-post DEV/X — draft ready (planning/launch-essay.md, incl. X-thread + DEV notes); remaining: owner review + publish to the site
 - [ ] Show HN post (title + first-comment skeleton drafted in the strategy doc); be present in comments all day
 - [ ] r/ClaudeAI + X thread same week, each natively reframed
-- [ ] README: friendly comparison note vs the island apps ("session axis vs project axis") + submit to relevant GitHub topics (claude-code, agent-monitoring)
+- [ ] README: friendly comparison note vs the session-monitor apps ("session axis vs project axis") + submit to relevant GitHub topics (claude-code, agent-monitoring)
 - [ ] opportunistic: pitch the hooks integration as a Claude Code hooks case study wherever community tooling is showcased
 
 ### Remote access (Tier 1)
@@ -69,7 +69,7 @@
 - [ ] "open plan in Cursor/Obsidian" button
 - [ ] macOS notifications for attention items (only if dashboard-glancing proves insufficient)
 
-### Attention loop (borrowed ideas — planning/ideas-from-vibeisland-and-ping-island.md; sounds explicitly rejected: no audio, ever)
+### Attention loop (borrowed ideas — research notes in planning/; sounds explicitly rejected: no audio, ever)
 
 - [x] waiting-time escalation: sort needs-attention projects by longest agent wait; chip shows elapsed time and intensifies past 10m (idea 3) (2026-07-16)
 - [x] show what the agent is waiting for: last assistant message excerpt in agent state, rendered in the waiting popup + Workspace card + `cockpit status`; doubles as completion summary (ideas 2+7) (2026-07-16)
@@ -79,7 +79,7 @@
 - [x] best-effort Claude quota visibility: `providerStatus()` header pill + warning before dispatch (idea 8) (2026-07-16)
 - [x] per-project accent color/icon: optional `color:`/`icon:` in .project-cockpit.yml, hash-of-name fallback, dot in sidebar + `cockpit list` (idea 9) (2026-07-16)
 - [ ] follow-up: escalation thresholds (10m amber→red) hardcoded — make configurable if they prove wrong in practice
-- [ ] follow-up: hook ingress covers Claude Code only — Ping Island also ingests Gemini/Codex; add if those enter the workflow
+- [ ] follow-up: hook ingress covers Claude Code only — Gemini/Codex hook ingestion if those enter the workflow
 - [x] follow-up: dashboard screenshot refresh in README once the new UI settles (accent dots, /focus view) (2026-07-16)
 
 ### Dashboard redesign (design notes 2026-07-10)
