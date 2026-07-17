@@ -142,6 +142,10 @@ Actions with a `window:` key are sent to that tmux window (e.g. long-running dev
 
 Every attention chip is a button. Clicking opens a popup that explains the situation and offers the safest available remedy: **auto-fix** where harmless (`pull --ff-only` behind-remote, create a missing config from template), **agent-fix** where judgment helps (uncommitted changes → an attended Claude session in a tmux `commit` window that groups and commits, never pushes), **copyable commands** where your safety model says manual-only (push, set-upstream), and **guidance** where it's genuinely your turn (agent waiting for you). All fixes are audit-logged (`fix:*`).
 
+## Where it sits (vs. agent session monitors)
+
+There's a healthy crop of macOS notch/menu-bar apps that watch your AI coding *sessions* and ping you for approvals — good tools, solving a real problem one level below this one. A session is not a project: a project is a repo with dirty files, a plan with open questions, a dev server, a deploy — *and* maybe an agent. The cockpit's unit is the project and its currency is attention: which of many projects is worth yours right now. If you want GUI permission approvals from your notch, use one of those apps (they compose fine with this); the cockpit deliberately refuses to approve anything — it gets you *to* the agent's terminal fast, with context.
+
 ## Caveats
 
 Built for one specific desk; know the assumptions before adopting:
