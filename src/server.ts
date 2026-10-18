@@ -22,8 +22,15 @@ import {
   providerStatus, readFoundation,
   planStats, portListening, readAudit, readChangelog, readPlan, recentCommits,
   runInline, saveRegistry, sendToWindow, shA, shortAge, startAgentTask, startImplementation,
-  tmuxSessionAlive, tmuxWindows,
+  tmuxSessionAlive, tmuxWindows, ensureSession, sh,
 } from "./state.ts";
+import {
+  type Bucket, BUCKETS, PORTFOLIO_FILE, STATUS_ORDER, addIdeas, addTicket, bucketOf, checkTicket, deriveStatus,
+  discover, draftAbout, draftPlan, entryMatches, findOpenTicket, lastActivity, markReviewed, moveTicket, oneLine,
+  planFeature, projectKind, queueAdd, queueMove, queueRemove, readAbout, readPortfolio, setBucket, setIgnored,
+  setRoot, suggestIdeas, underARoot, writeAbout, expandHome, hooksInstalled, ago, cleanTicket,
+} from "./home.ts";
+import { HOME_PAGE } from "./home-page.ts";
 
 async function projectSummary(p: Project, cwds: Awaited<ReturnType<typeof claudeCwds>>) {
   const svc = localService(p);
@@ -45,6 +52,7 @@ async function projectSummary(p: Project, cwds: Awaited<ReturnType<typeof claude
     plan, planStats: plan ? planStats(plan) : null,
     foundation,
     attention: attentionItems(p, git, agent, plan, foundation),
+    dirtyList: git.dirty.slice(0, 30), slow: git.slow, hasUpstream: git.hasUpstream, hasRemote: git.hasRemote,
   };
 }
 
@@ -63,6 +71,7 @@ function degradedSummary(p: Project, err: unknown): Awaited<ReturnType<typeof pr
     color: accent.css, icon: accent.icon,
     plan: null, planStats: null, foundation: null,
     attention: [`status unavailable: ${msg.split("\n")[0]}`],
+    dirtyList: [], slow: false, hasUpstream: false, hasRemote: false,
   };
 }
 
@@ -105,6 +114,101 @@ async function projectDetail(p: Project) {
       name, cmd: a.cmd, tier: a.tier ?? "safe", window: a.window ?? null,
     })),
     changelog,
+  };
+}
+
+// ---------- home screen: every project + the cross-project work list ----------
+// Recomputed per request like everything else; the only inputs are registry,
+// plan.md/ABOUT.md files, portfolio.md, git/tmux/agent state.
+type WorkItem = { id: string; project: string; type: string; text: string; detail?: string; cmd?: string; feature?: string; window?: string };
+const DAY = 86_400;
+
+async function homeData() {
+  const cwds = await claudeCwds();
+  const pf = readPortfolio();
+  const now = Math.floor(Date.now() / 1000);
+  const projects = allProjects();
+  const rows = await Promise.all(projects.map(async (p) => {
+    const s = await projectSummary(p, cwds).catch((err) => degradedSummary(p, err));
+    const act = await lastActivity(p, s.dirtyList).catch(() => null);
+    const activitySec = act ? Math.max(0, now - act) : null;
+    const bucket = bucketOf(p, pf);
+    const bucketIndex = bucket ? pf.buckets[bucket].findIndex((e) => entryMatches(e, p)) : null;
+    const openTickets = (s.plan?.features ?? []).flatMap((f) => f.tickets.filter((t) => !t.done).map((t) => ({ feature: f.name, text: t.text })));
+    const status = deriveStatus({
+      agent: s.agent.state, openQuestions: s.planStats?.openQuestions ?? 0, openTickets: openTickets.length,
+      ticketsTotal: s.planStats?.ticketsTotal ?? 0, hasPlan: !!s.plan, activitySec, bucket,
+    });
+    const { plan, dirtyList, ...rest } = s;
+    return {
+      ...rest, kind: projectKind(p), about: readAbout(p.root), bucket, bucketIndex, status, activitySec, activityAge: ago(activitySec),
+      openTickets, features: (plan?.features ?? []).map((f) => f.name),
+      questions: (plan?.direction ?? []).filter((d) => !d.done).map((d) => d.text),
+      ideas: (plan?.ideas ?? []).filter((i) => !i.planned).map((i) => i.text),
+      planPath: plan?.path ?? null,
+    };
+  }));
+  const byName = new Map(rows.map((r) => [r.name, r]));
+  const projOf = (entry: string) => projects.find((p) => entryMatches(entry, p));
+
+  // global queue, each entry resolved against live plan.md state
+  const queue = pf.queue.map((q) => {
+    const p = projOf(q.project);
+    const ticket = p ? findOpenTicket(readPlan(p), q.text) : null;
+    return { ...q, name: p?.name ?? null, feature: ticket?.feature ?? null, ticket: ticket?.text ?? null,
+      stale: !p ? "project not registered" : !ticket ? "no open plan.md ticket matches (done or reworded?)" : null };
+  });
+
+  const items: WorkItem[] = [];
+  const add = (it: Omit<WorkItem, "id">) => items.push({ id: `${it.type}|${it.project}|${it.text}`, ...it });
+  for (const r of rows) {
+    if (r.agent.state === "waiting") add({ project: r.name, type: "agent", text: "Claude is waiting for you", detail: (r.agent as any).lastMessage ?? r.agent.detail });
+    for (const q of r.questions) add({ project: r.name, type: "answer", text: q });
+    if (r.slow) add({ project: r.name, type: "fix", text: "git status timed out — repo files evicted to cloud-only?" });
+    if (r.dirty) add({ project: r.name, type: "fix", text: `${r.dirty} uncommitted file${r.dirty > 1 ? "s" : ""}`, detail: "commit them, or have Claude review & commit (it never pushes)" });
+    if (r.ahead) add({ project: r.name, type: "run", text: `push ${r.ahead} commit${r.ahead > 1 ? "s" : ""}`, cmd: `git -C ${r.root} push`, detail: "manual by design — for some projects push = deploy" });
+    if (r.behind) add({ project: r.name, type: "fix", text: `${r.behind} commit${r.behind > 1 ? "s" : ""} behind remote`, cmd: `git -C ${r.root} pull --ff-only` });
+    if (r.hasRemote && !r.hasUpstream && r.branch && r.branch !== "?") add({ project: r.name, type: "run", text: "set an upstream branch", cmd: `git -C ${r.root} push -u origin ${r.branch}` });
+    if (r.foundation?.outdated) add({ project: r.name, type: "fix", text: `foundation v${r.foundation.installed} → v${r.foundation.current}` });
+  }
+  for (const q of queue) {
+    if (!q.name || q.stale) continue;
+    add({ project: q.name, type: q.you ? "you" : "ticket", text: q.ticket!, feature: q.feature! });
+  }
+  // projects in view with nothing queued globally still surface their top ticket
+  for (const r of rows) {
+    if (queue.some((q) => q.name === r.name && !q.stale) || !r.openTickets.length || r.status === "parked") continue;
+    add({ project: r.name, type: "ticket", text: r.openTickets[0].text, feature: r.openTickets[0].feature });
+  }
+
+  // portfolio hints: the file vs what is actually happening
+  const hints: { text: string; project?: string }[] = [];
+  const reviewedAge = pf.reviewed ? Math.floor((Date.now() - Date.parse(pf.reviewed)) / 1000 / DAY) : null;
+  if (pf.exists && (reviewedAge === null || reviewedAge >= 7)) {
+    const why = reviewedAge === null ? "never reviewed" : `last reviewed ${reviewedAge} days ago`;
+    hints.push({ text: `Weekly portfolio review due — ${why}` });
+    add({ project: "", type: "decide", text: "Weekly portfolio review", detail: `${why}: re-rank Now / Next / Later / Parked, trim Up next, then mark reviewed` });
+  }
+  for (const r of rows) {
+    if (r.bucket === "Now" && ["dormant", "cooling", "done"].includes(r.status))
+      hints.push({ project: r.name, text: `${r.name} is in Now but ${r.status}${r.activityAge ? ` (last activity ${r.activityAge})` : ""} — still a priority?` });
+    if (r.bucket === "Parked" && r.activitySec !== null && r.activitySec < 7 * DAY)
+      hints.push({ project: r.name, text: `${r.name} is Parked but had activity ${r.activityAge} — unpark it?` });
+  }
+  for (const b of BUCKETS) for (const e of pf.buckets[b])
+    if (!projOf(e)) hints.push({ text: `portfolio.md lists "${e}" under ${b}, but it isn't registered` });
+
+  // recently shipped: commits from the last 7 days, all projects
+  const recent = (await Promise.all(projects.map(async (p) => {
+    const r = await shA("git", ["-C", p.root, "log", "--since=7.days.ago", "-n", "5", "--format=%ct%x09%h%x09%s"]);
+    return r.ok && r.out ? r.out.split("\n").map((l) => { const [ct, hash, subject] = l.split("\t"); return { project: p.name, ts: Number(ct), hash, subject }; }) : [];
+  }))).flat().sort((a, b) => b.ts - a.ts).slice(0, 10).map((c) => ({ ...c, age: ago(now - c.ts) }));
+
+  return {
+    projects: rows, items, hints, recent,
+    portfolio: { exists: pf.exists, path: PORTFOLIO_FILE, reviewed: pf.reviewed, buckets: pf.buckets, queue },
+    statuses: STATUS_ORDER,
+    setup: { projects: rows.length, hooks: hooksInstalled(), portfolio: pf.exists },
   };
 }
 
@@ -160,7 +264,7 @@ export function startServer(port = 4400, opts: ServerOpts = {}) {
         if (!tokenMatches(bearer, token) && !tokenMatches(cookieTok, token)) {
           // One-time login URL: GET /?token=… (or /focus?token=…) sets the session
           // cookie, then redirects to a clean path so the token doesn't linger.
-          if (req.method === "GET" && ["/", "/focus"].includes(url.pathname) && tokenMatches(url.searchParams.get("token"), token)) {
+          if (req.method === "GET" && ["/", "/focus", "/project"].includes(url.pathname) && tokenMatches(url.searchParams.get("token"), token)) {
             return new Response(null, {
               status: 303,
               headers: {
@@ -204,6 +308,188 @@ export function startServer(port = 4400, opts: ServerOpts = {}) {
         const p = getProject(m[1]);
         if (!p) return json({ error: "not found" }, 404);
         return json(await projectDetail(p));
+      }
+
+      if (req.method === "GET" && url.pathname === "/api/home") return json(await homeData());
+
+      if (req.method === "GET" && url.pathname === "/api/discover") return json(discover());
+
+      // POST bodies are JSON; every write below names a registered project (getProject)
+      // or a path under a known root, and is audit-logged.
+      const body = (req.method === "POST" ? await req.clone().json().catch(() => null) : null) ?? {};
+      const proj = () => getProject(String(body.project ?? ""));
+
+      if (req.method === "POST" && url.pathname === "/api/roots") {
+        const r = setRoot(String(body.path ?? ""), body.remove !== true);
+        if (!r.ok) return json({ error: r.error }, 400);
+        audit("-", body.remove === true ? "roots:remove" : "roots:add", "safe", `${r.path} [dash]`);
+        return json({ ok: true, path: r.path });
+      }
+
+      if (req.method === "POST" && url.pathname === "/api/ignore") {
+        const r = setIgnored(String(body.path ?? ""), body.ignore !== false);
+        if (!r.ok) return json({ error: r.error }, 400);
+        audit("-", body.ignore !== false ? "discover:ignore" : "discover:unignore", "safe", `${body.path} [dash]`);
+        return json({ ok: true });
+      }
+
+      if (req.method === "GET" && url.pathname === "/api/about/draft") {
+        const p = getProject(url.searchParams.get("project") ?? "");
+        const path = p?.root ?? expandHome(url.searchParams.get("path") ?? "");
+        if (!p && !underARoot(path)) return json({ error: "unknown project" }, 404);
+        return json({ about: readAbout(path), draft: draftAbout(path) });
+      }
+
+      if (req.method === "POST" && url.pathname === "/api/about") {
+        const p = proj();
+        if (!p) return json({ error: "unknown project" }, 404);
+        const title = oneLine(body.title, 120);
+        const description = String(body.description ?? "").replace(/\s+/g, " ").trim();
+        if (!title) return json({ error: "a one-line tagline (≤ 120 chars) is required" }, 400);
+        if (description.length > 2000) return json({ error: "description ≤ 2000 chars" }, 400);
+        writeAbout(p.root, title, description);
+        audit(p.name, "about:edit", "safe", `${title.slice(0, 60)} [dash]`);
+        return json({ ok: true });
+      }
+
+      if (req.method === "POST" && url.pathname === "/api/plan/add") {
+        const p = proj();
+        if (!p) return json({ error: "unknown project" }, 404);
+        const r = addTicket(p, String(body.feature ?? "Tickets"), String(body.text ?? ""));
+        if (!r.ok) return json({ error: r.error }, 400);
+        if (body.queue) queueAdd(p.name, cleanTicket(body.text)!, body.you === true);
+        audit(p.name, "plan:add", "safe", `${String(body.text).slice(0, 70)} [dash]`);
+        return json({ ok: true });
+      }
+
+      if (req.method === "POST" && url.pathname === "/api/plan/check") {
+        const p = proj();
+        if (!p) return json({ error: "unknown project" }, 404);
+        const text = String(body.text ?? "");
+        // queue entries that resolve to exactly this ticket — resolved before it is checked
+        const plan0 = readPlan(p);
+        const queued = readPortfolio().queue.filter((q) => entryMatches(q.project, p) && findOpenTicket(plan0, q.text)?.text === text);
+        const r = checkTicket(p, String(body.feature ?? ""), text, body.done !== false);
+        if (!r.ok) return json({ error: r.error }, 400);
+        // a checked ticket leaves the global queue (plan.md keeps the record)
+        if (body.done !== false) for (const q of queued) queueRemove(q.project, q.text);
+        audit(p.name, body.done !== false ? "plan:check" : "plan:uncheck", "safe", `${text.slice(0, 70)} [dash]`);
+        return json({ ok: true });
+      }
+
+      if (req.method === "POST" && url.pathname === "/api/plan/move") {
+        const p = proj();
+        if (!p) return json({ error: "unknown project" }, 404);
+        const r = moveTicket(p, String(body.feature ?? ""), String(body.text ?? ""), body.before == null ? null : String(body.before));
+        if (!r.ok) return json({ error: r.error }, 400);
+        audit(p.name, "plan:move", "safe", `${String(body.text).slice(0, 60)} [dash]`);
+        return json({ ok: true });
+      }
+
+      if (req.method === "POST" && url.pathname === "/api/portfolio/bucket") {
+        const p = proj();
+        if (!p) return json({ error: "unknown project" }, 404);
+        const bucket = body.bucket == null ? null : (BUCKETS as readonly string[]).includes(body.bucket) ? (body.bucket as Bucket) : undefined;
+        if (bucket === undefined) return json({ error: `bucket must be one of ${BUCKETS.join(", ")}` }, 400);
+        const r = setBucket(p, bucket, Number.isInteger(body.index) ? body.index : Infinity);
+        if (!r.ok) return json({ error: r.error }, 400);
+        audit(p.name, "portfolio:bucket", "safe", `${bucket ?? "unranked"} [dash]`);
+        return json({ ok: true });
+      }
+
+      if (req.method === "POST" && url.pathname === "/api/portfolio/queue") {
+        const op = String(body.op ?? "");
+        const project = String(body.project ?? ""), text = String(body.text ?? "");
+        let ok = false;
+        if (op === "add") {
+          const p = getProject(project);
+          const t = cleanTicket(text);
+          if (!p || !t || /<!--|-->/.test(t)) return json({ error: "a registered project and one-line ticket text (no HTML comments) are required" }, 400);
+          if (!findOpenTicket(readPlan(p), t)) return json({ error: "no open plan.md ticket in that project matches this text — add it to the plan first" }, 400);
+          queueAdd(p.name, t, body.you === true, Number.isInteger(body.index) ? body.index : Infinity);
+          ok = true;
+        } else if (op === "remove") ok = queueRemove(project, text);
+        else if (op === "move") ok = Number.isInteger(body.index) && queueMove(project, text, body.index);
+        else return json({ error: "op must be add, remove or move" }, 400);
+        if (!ok) return json({ error: "queue entry not found (portfolio.md changed?)" }, 404);
+        audit(project || "-", `portfolio:queue:${op}`, "safe", `${text.slice(0, 60)} [dash]`);
+        return json({ ok: true });
+      }
+
+      if (req.method === "POST" && url.pathname === "/api/portfolio/reviewed") {
+        markReviewed();
+        audit("-", "portfolio:reviewed", "safe", "[dash]");
+        return json({ ok: true });
+      }
+
+      if (req.method === "POST" && url.pathname === "/api/ideas/add") {
+        const p = proj();
+        if (!p) return json({ error: "unknown project" }, 404);
+        const list = Array.isArray(body.ideas) ? body.ideas.map(String) : String(body.ideas ?? "").split("\n");
+        const r = addIdeas(p, list);
+        if (!r.ok) return json({ error: r.error }, 400);
+        audit(p.name, "ideas:add", "safe", `${r.added} idea(s) [dash]`);
+        return json({ ok: true, added: r.added });
+      }
+
+      if (req.method === "POST" && url.pathname === "/api/ideas/suggest") {
+        const p = proj();
+        if (!p) return json({ error: "unknown project" }, 404);
+        audit(p.name, "ideas:suggest", "safe", "claude -p [dash]");
+        const r = await suggestIdeas(p, oneLine(body.steer, 300) ?? "");
+        return r.error ? json({ error: r.error }, 500) : json(r);
+      }
+
+      if (req.method === "POST" && url.pathname === "/api/plan/draft") {
+        const p = proj();
+        const idea = oneLine(body.idea, 600);
+        if (!p || !idea) return json({ error: "project and a one-line idea are required" }, 400);
+        audit(p.name, "plan:draft", "safe", `${idea.slice(0, 60)} — claude -p [dash]`);
+        const r = await draftPlan(p, idea);
+        return r.error ? json({ error: r.error }, 500) : json(r);
+      }
+
+      if (req.method === "POST" && url.pathname === "/api/plan/feature") {
+        const p = proj();
+        if (!p) return json({ error: "unknown project" }, 404);
+        const tickets = Array.isArray(body.tickets) ? body.tickets.map(String) : String(body.tickets ?? "").split("\n");
+        const r = planFeature(p, String(body.feature ?? ""), tickets, body.idea ? String(body.idea) : undefined);
+        if (!r.ok) return json({ error: r.error }, 400);
+        audit(p.name, "plan:feature", "safe", `${String(body.feature).slice(0, 60)} (${tickets.filter((t: string) => t.trim()).length} tickets) [dash]`);
+        return json({ ok: true });
+      }
+
+      // Ideate/Plan in a live, attended session — the existing confirm-tier agent path.
+      if (req.method === "POST" && url.pathname === "/api/session") {
+        const p = proj();
+        if (!p) return json({ error: "unknown project" }, 404);
+        const mode = body.mode === "plan" ? "plan" : "ideate";
+        if (body.confirmed !== true) return json({ needsConfirm: true }, 409);
+        const brief = mode === "ideate"
+          ? "Brainstorm with me about where to take this project next. Read plan.md, ABOUT.md and the README first. Propose ideas and discuss them with me; add the ones I accept as plain bullets under a ## Ideas section in plan.md (create it before ## Features if missing). Do not start implementing anything."
+          : "Help me plan the next piece of work in this project. Read plan.md, ABOUT.md and the README first. Agree with me on one feature, then add it to plan.md as a ### feature block of small checkbox tickets in priority order (spec v1.1: surgical edits only). If it came from a bullet under ## Ideas, append → planned as \"<feature>\" (date) to that bullet. Do not start implementing.";
+        const r = await startAgentTask(p, brief, mode);
+        if (!r.ok) return json({ error: r.error }, 500);
+        audit(p.name, `session:${mode}`, "confirm", `claude session in tmux:${mode} [dash]`);
+        return json({ ok: true, window: mode });
+      }
+
+      // Terminal: raise the project's tmux session in iTerm2 — create the session if
+      // needed and open a window attached to it. Opens a terminal; never types into one.
+      if (req.method === "POST" && url.pathname === "/api/terminal") {
+        const p = proj();
+        if (!p) return json({ error: "unknown project" }, 404);
+        const copy = `cockpit go ${p.name}`;
+        if (await tmuxSessionAlive(p.name)) {
+          const f = await focusWindow(p);
+          if (f.ok && f.attached) { audit(p.name, "terminal", "safe", "focused [dash]"); return json({ ok: true, focused: f.window }); }
+        }
+        const tmux = sh("bash", ["-lc", "command -v tmux"]).out;
+        if (!/^[\w.@+-]+$/.test(p.name) || !tmux || !existsSync("/Applications/iTerm.app")) return json({ ok: false, copy });
+        await ensureSession(p);
+        const r = sh("osascript", ["-e", `tell application "iTerm" to create window with default profile command "${tmux} -CC attach -t =${p.name}"`]);
+        audit(p.name, "terminal", "safe", `${r.ok ? "opened iTerm2 window" : "osascript failed"} [dash]`);
+        return r.ok ? json({ ok: true, opened: true }) : json({ ok: false, copy });
       }
 
       if (req.method === "GET" && url.pathname === "/api/candidates") {
@@ -382,6 +668,9 @@ export function startServer(port = 4400, opts: ServerOpts = {}) {
       }
 
       if (req.method === "GET" && url.pathname === "/") {
+        return new Response(HOME_PAGE, { headers: { "content-type": "text/html; charset=utf-8" } });
+      }
+      if (req.method === "GET" && url.pathname === "/project") {
         return new Response(PAGE, { headers: { "content-type": "text/html; charset=utf-8" } });
       }
       if (req.method === "GET" && url.pathname === "/focus") {
@@ -576,6 +865,7 @@ const PAGE = `<!doctype html>
 <div id="scrim" onclick="toggleSide(false)"></div>
 <div class="layout">
   <aside id="aside">
+    <a class="proj" href="/" style="color:var(--accent)">← All projects</a>
     <h1>Projects</h1><div id="side"></div>
     <button class="proj" onclick="openAdd()" style="color:var(--accent)">＋ Add project…</button>
     <div class="grow"></div>

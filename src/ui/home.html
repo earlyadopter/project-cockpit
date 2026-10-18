@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cockpit</title>
+<style>/*HOME_CSS*/</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div>
+      <h1>cockpit</h1>
+      <div class="sum" id="sum">loading…</div>
+    </div>
+    <nav>
+      <a href="/focus">focus view</a>
+      <a href="/project">project detail</a>
+      <button class="link" onclick="openAddPath()">＋ add project</button>
+    </nav>
+  </header>
+  <div id="app"><div class="empty">Loading…</div></div>
+  <footer><span id="freshness">updated just now</span> · <button class="link" onclick="refresh(true)">↻ refresh</button> · recomputed live from plan.md, git, tmux · priorities in <span class="mono" id="pfpath">~/.project-cockpit/portfolio.md</span></footer>
+</div>
+
+<div id="modal" class="modal" onclick="if(event.target===this)closeModal()">
+  <div class="box">
+    <div class="mhead"><span id="mtitle"></span><button class="link x" onclick="closeModal()" aria-label="close">✕</button></div>
+    <div class="mbody" id="mbody"></div>
+  </div>
+</div>
+<div id="toast"></div>
+<script>/*HOME_JS*/</script>
+</body>
+</html>
