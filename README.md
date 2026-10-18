@@ -7,6 +7,9 @@ One binary, five verbs, no daemon, no cache — every call recomputes live state
 ![Demo: attention chip → what the agent asked → decide → ticket queued](docs/demo.gif)
 
 ```
+cockpit                           open the dashboard — starts it if it's down; first run
+                                  installs it as a login item (macOS launchd)
+cockpit doctor                    one-screen check when the dashboard isn't there
 cockpit list                      all projects, one status line each (attention first)
 cockpit status <project>          git, tmux, services, env files, actions
 cockpit go <project>              attach-or-create the project's tmux session (dev/agent/shell)
@@ -20,7 +23,7 @@ cockpit run <project> <action>    run a declared action — tier-enforced, audit
 cockpit add [path]                register a project (default: cwd)
 cockpit hooks [--install]         precise agent events via Claude Code hooks (opt-in)
 cockpit audit                     print the audit log
-cockpit dash [port]               dashboard at http://localhost:4400 (Phase 2)
+cockpit dash [port]               run the dashboard in this terminal instead (says so if already up)
 ```
 
 ## The mental model, in plain words
@@ -108,15 +111,16 @@ Requires [bun](https://bun.sh) (runs the TypeScript directly — no build step) 
 git clone https://github.com/earlyadopter/project-cockpit.git && cd project-cockpit && bun install && ln -sf "$PWD/bin/cockpit" ~/.local/bin/cockpit
 ```
 
-Then register a project and go:
+Then register a project and open the dashboard:
 
 ```bash
 cockpit add ~/projects/my-app
-cockpit dash             # dashboard at http://localhost:4400
-cockpit dash --install   # optional: auto-start at login and self-restart (launchd)
+cockpit                  # opens http://localhost:4400 — that's the whole habit
 ```
 
-`--install` writes `~/Library/LaunchAgents/com.project-cockpit.dash.plist` (RunAtLoad + KeepAlive, PATH including Homebrew/bun so tmux detection works; logs at `~/.project-cockpit/dash.log`). Remove with `cockpit dash --uninstall`. After a reboot the dashboard is simply there — but tmux sessions are not: recreate each with `cockpit go <project>`, and resume a project's Claude conversation with `claude --continue` in its agent tab.
+The first plain `cockpit` installs the dashboard as a login item (launchd) so it is always there afterwards; every later `cockpit` just opens it, restarting it first if it died. If it ever isn't there, `cockpit doctor` says why. Prefer not to have a login item? `cockpit dash` runs it in the current terminal instead.
+
+The login item (also `cockpit dash --install`) writes `~/Library/LaunchAgents/com.project-cockpit.dash.plist` (RunAtLoad + KeepAlive, PATH including Homebrew/bun so tmux detection works; logs at `~/.project-cockpit/dash.log`). Remove with `cockpit dash --uninstall`. After a reboot the dashboard is simply there — but tmux sessions are not: recreate each with `cockpit go <project>`, and resume a project's Claude conversation with `claude --continue` in its agent tab.
 
 ## Remote access (phone / iPad)
 

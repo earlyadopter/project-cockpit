@@ -8,7 +8,7 @@ import { spawnSync } from "node:child_process";
 import { basename, join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import {
-  AUDIT_FILE, EVENTS_FILE, OPEN_TARGETS, REGISTRY_FILE,
+  AUDIT_FILE, COCKPIT_DIR, EVENTS_FILE, OPEN_TARGETS, REGISTRY_FILE,
   type Project, type Tier,
   accentColor, agentState, allProjects, attentionItems, audit, claudeCwds, ensureSession, focusWindow,
   gitState, readFoundation,
@@ -302,7 +302,13 @@ function installLaunchAgent(port: number, host?: string): void {
   writeFileSync(PLIST_PATH, plist);
   const uid = process.getuid?.() ?? 501;
   sh("launchctl", ["bootout", `gui/${uid}/${LAUNCH_LABEL}`]); // ignore failure (not loaded)
-  const r = sh("launchctl", ["bootstrap", `gui/${uid}`, PLIST_PATH]);
+  // bootout returns before the job is gone; bootstrapping straight after fails
+  // ("Bootstrap failed: 5") — so a reinstall waits for the unload, then retries.
+  let r = { ok: false, out: "" };
+  for (let i = 0; i < 20 && !r.ok; i++) {
+    if (!sh("launchctl", ["print", `gui/${uid}/${LAUNCH_LABEL}`]).ok) r = sh("launchctl", ["bootstrap", `gui/${uid}`, PLIST_PATH]);
+    if (!r.ok) Bun.sleepSync(250);
+  }
   if (!r.ok) die(`launchctl bootstrap failed — try: launchctl bootstrap gui/${uid} ${PLIST_PATH}`);
   console.log(`installed: dashboard now starts at login and stays up (port ${port}${host ? `, host ${host}` : ""})`);
   console.log(dim(`plist: ${PLIST_PATH}\nlogs:  ${logPath}\nremove with: cockpit dash --uninstall`));
@@ -316,6 +322,177 @@ function uninstallLaunchAgent(): void {
   sh("launchctl", ["bootout", `gui/${uid}/${LAUNCH_LABEL}`]);
   if (existsSync(PLIST_PATH)) unlinkSync(PLIST_PATH);
   console.log("uninstalled: dashboard no longer starts at login");
+}
+
+// ---------- finding "the" dashboard (`cockpit`, `cockpit dash`, `cockpit doctor`) ----------
+// The installed launchd agent is the source of truth for where the dashboard lives;
+// without one, the default port. Liveness is a real HTTP probe, never a cached flag.
+const DEFAULT_PORT = 4400;
+const LOOPBACK = new Set(["127.0.0.1", "localhost", "::1"]);
+interface DashTarget { port: number; host?: string; token?: string }
+
+function plistValue(key: string, format: "json" | "raw" = "json"): string | null {
+  if (!existsSync(PLIST_PATH)) return null;
+  const r = sh("plutil", ["-extract", key, format, "-o", "-", PLIST_PATH]);
+  return r.ok ? r.out : null;
+}
+
+function installedTarget(): (DashTarget & { serverPath: string }) | null {
+  const raw = plistValue("ProgramArguments");
+  if (!raw) return null;
+  const a: string[] = JSON.parse(raw);
+  const h = a.indexOf("--host");
+  return { port: Number(a[2]) || DEFAULT_PORT, host: h >= 0 ? a[h + 1] : undefined, serverPath: a[1] ?? "" };
+}
+
+// Mirrors the server: loopback binds need no token; others read ~/.project-cockpit/token.
+function targetToken(t: DashTarget): string | undefined {
+  if (t.token) return t.token;
+  if (!t.host || LOOPBACK.has(t.host)) return process.env.COCKPIT_TOKEN || undefined;
+  const f = join(COCKPIT_DIR, "token");
+  return existsSync(f) ? readFileSync(f, "utf8").trim() || undefined : undefined;
+}
+
+function dashUrl(t: DashTarget): string {
+  const loop = !t.host || LOOPBACK.has(t.host);
+  const tok = targetToken(t);
+  return `http://${loop ? "localhost" : t.host}:${t.port}/${tok ? `?token=${tok}` : ""}`;
+}
+
+// "ours" = a cockpit answered (200, or 401 from its token gate); "other" = something else owns the port.
+async function probe(t: DashTarget): Promise<"ours" | "other" | "down"> {
+  const host = !t.host || LOOPBACK.has(t.host) ? "127.0.0.1" : t.host;
+  const tok = targetToken(t);
+  try {
+    const r = await fetch(`http://${host}:${t.port}/`, {
+      headers: tok ? { authorization: `Bearer ${tok}` } : {},
+      signal: AbortSignal.timeout(3000),
+    });
+    // Match the page's own markers, not just the word — a file server listing a
+    // folder named project-cockpit would contain "cockpit" too.
+    const body = await r.text();
+    const ours = r.status === 200 ? body.includes("<title>cockpit</title>") : r.status === 401 && body.includes("`cockpit dash`");
+    return ours ? "ours" : "other";
+  } catch {
+    return (await portListening(t.port)) ? "other" : "down";
+  }
+}
+
+async function waitUntilUp(t: DashTarget, ms: number): Promise<boolean> {
+  for (const end = Date.now() + ms; Date.now() < end; await Bun.sleep(300)) {
+    if ((await probe(t)) === "ours") return true;
+  }
+  return false;
+}
+
+function agentStatus(): { loaded: boolean; pid?: number } {
+  const uid = process.getuid?.() ?? 501;
+  const r = sh("launchctl", ["print", `gui/${uid}/${LAUNCH_LABEL}`]);
+  if (!r.ok) return { loaded: false };
+  const pid = Number(r.out.match(/^\s*pid = (\d+)/m)?.[1]);
+  return { loaded: true, pid: pid || undefined };
+}
+
+// `cockpit` with no args: open the dashboard, starting (or first-time installing) it if needed.
+async function cmdHome(): Promise<void> {
+  const installed = installedTarget();
+  const t: DashTarget = installed ?? { port: DEFAULT_PORT };
+  let state = await probe(t);
+  if (state === "other") die(`port ${t.port} is taken by something that isn't the cockpit — see: lsof -nP -iTCP:${t.port} -sTCP:LISTEN`);
+  if (state === "down") {
+    if (process.platform !== "darwin") {
+      console.log(dim("no login agent on this platform — running the dashboard in this terminal"));
+      return cmdDash([String(t.port)]);
+    }
+    const uid = process.getuid?.() ?? 501;
+    if (installed) {
+      console.log(dim("dashboard not answering — restarting its login agent…"));
+      if (agentStatus().loaded) sh("launchctl", ["kickstart", "-k", `gui/${uid}/${LAUNCH_LABEL}`]);
+      else sh("launchctl", ["bootstrap", `gui/${uid}`, PLIST_PATH]);
+    } else {
+      console.log("first run: installing the dashboard as a login item, so it is simply always there");
+      installLaunchAgent(t.port);
+    }
+    if (!(await waitUntilUp(t, 10_000))) die("dashboard did not come up within 10s — run: cockpit doctor");
+  }
+  const url = dashUrl(t);
+  console.log(`cockpit dashboard: ${url}`);
+  sh("open", [url]);
+}
+
+async function cmdDash(args: string[]): Promise<void> {
+  const port = Number(args.find((a) => /^\d+$/.test(a))) || DEFAULT_PORT;
+  const flagVal = (name: string) => {
+    const i = args.indexOf(name);
+    return i >= 0 ? args[i + 1] : undefined;
+  };
+  const host = flagVal("--host");
+  const token = flagVal("--token");
+  if (args.includes("--install")) { installLaunchAgent(port, host); return; }
+  if (args.includes("--uninstall")) { uninstallLaunchAgent(); return; }
+  // Only auto-open when the plain localhost URL will actually work (no token
+  // in play) — otherwise the server has printed the tokened login URL.
+  const tokenInPlay = token || process.env.COCKPIT_TOKEN || (host && !LOOPBACK.has(host));
+  const t: DashTarget = { port, host, token };
+  const state = await probe(t);
+  if (state === "ours") {
+    const via = installedTarget()?.port === port && agentStatus().loaded ? ` (login agent ${LAUNCH_LABEL})` : "";
+    console.log(`already running${via}: ${dashUrl(t)} — nothing to start`);
+    if (process.stdout.isTTY && !tokenInPlay) sh("open", [dashUrl(t)]);
+    return;
+  }
+  if (state === "other") die(`port ${port} is taken by something that isn't the cockpit — see: lsof -nP -iTCP:${port} -sTCP:LISTEN`);
+  const { startServer } = await import("./server.ts");
+  startServer(port, { host, token });
+  if (process.stdout.isTTY && !tokenInPlay) sh("open", [`http://localhost:${port}`]);
+}
+
+// `cockpit doctor`: one screen answering "why isn't my dashboard there?"
+async function cmdDoctor(): Promise<void> {
+  type Level = "ok" | "warn" | "fail";
+  const rows: { level: Level; what: string; fix?: string }[] = [];
+  const add = (level: Level, what: string, fix?: string) => rows.push({ level, what, fix });
+
+  add("ok", `bun ${Bun.version} (${process.execPath})`);
+
+  const paths = loadRegistry();
+  const missing = paths.filter((p) => !existsSync(p));
+  if (paths.length === 0) add("warn", "registry is empty", "cockpit add <path-to-a-project>");
+  else if (missing.length) add("fail", `${missing.length} of ${paths.length} registered paths don't exist: ${missing.join(", ")}`, `edit ${REGISTRY_FILE}`);
+  else add("ok", `${paths.length} projects registered, all paths exist`);
+
+  const installed = installedTarget();
+  const here = fileURLToPath(new URL("./server.ts", import.meta.url));
+  if (process.platform !== "darwin") add("ok", "no login agent (macOS-only) — start with: cockpit dash");
+  else if (!installed) add("warn", "no login agent — the dashboard runs only while `cockpit dash` does", "cockpit   (installs it on first run)");
+  else {
+    if (installed.serverPath === here) add("ok", `login agent points at this checkout (port ${installed.port}${installed.host ? `, host ${installed.host}` : ""})`);
+    else add("fail", `login agent runs a different checkout: ${installed.serverPath}`, "cockpit dash --uninstall && cockpit dash --install");
+    if (plistValue("MaterializeDatalessFiles", "raw") !== "true") add("warn", "login agent can't read cloud-evicted files (MaterializeDatalessFiles missing)", "cockpit dash --uninstall && cockpit dash --install");
+    const a = agentStatus();
+    if (!a.loaded) add("fail", "login agent installed but not loaded", `launchctl bootstrap gui/${process.getuid?.() ?? 501} ${PLIST_PATH}`);
+    else if (!a.pid) add("fail", "login agent loaded but not running", `see ${join(COCKPIT_DIR, "dash.log")}`);
+    else add("ok", `login agent running (pid ${a.pid})`);
+  }
+
+  const t: DashTarget = installed ?? { port: DEFAULT_PORT };
+  const t0 = Date.now();
+  const state = await probe(t);
+  if (state === "ours") add("ok", `dashboard answering at ${dashUrl(t)} (${Date.now() - t0} ms)`);
+  else if (state === "other") add("fail", `port ${t.port} is taken by something that isn't the cockpit`, `lsof -nP -iTCP:${t.port} -sTCP:LISTEN`);
+  else add("fail", `nothing answering on port ${t.port}`, "cockpit");
+
+  const settings = readClaudeSettings();
+  const hooked = HOOK_EVENTS.filter((ev) => hasCockpitHook(settings, ev));
+  if (hooked.length === HOOK_EVENTS.length) add("ok", "Claude Code hooks installed (precise agent state)");
+  else add("warn", `Claude Code hooks: ${hooked.length}/${HOOK_EVENTS.length} — agent state is heuristic`, "cockpit hooks --install   (optional)");
+
+  const mark = { ok: green("✓"), warn: yellow("!"), fail: red("✗") };
+  for (const r of rows) {
+    console.log(`${mark[r.level]} ${r.what}`);
+    if (r.fix) console.log(dim(`    fix: ${r.fix}`));
+  }
+  if (rows.some((r) => r.level === "fail")) process.exit(1);
 }
 
 // ---------- Claude Code hooks (opt-in precise agent events) ----------
@@ -333,14 +510,19 @@ function hookCommand(): string {
   return `'${bin}' ${HOOK_MARKER}`;
 }
 
+function readClaudeSettings(): any {
+  if (!existsSync(CLAUDE_SETTINGS)) return {};
+  try { return JSON.parse(readFileSync(CLAUDE_SETTINGS, "utf8")); }
+  catch (e) { die(`could not parse ${CLAUDE_SETTINGS} — fix it first (${e})`); }
+}
+
+function hasCockpitHook(settings: any, ev: string): boolean {
+  return (settings.hooks?.[ev] ?? []).some((h: any) => (h.hooks ?? []).some((x: any) => String(x.command ?? "").includes(HOOK_MARKER)));
+}
+
 function cmdHooks(args: string[]): void {
-  let settings: any = {};
-  if (existsSync(CLAUDE_SETTINGS)) {
-    try { settings = JSON.parse(readFileSync(CLAUDE_SETTINGS, "utf8")); }
-    catch (e) { die(`could not parse ${CLAUDE_SETTINGS} — fix it first (${e})`); }
-  }
-  const hasOurs = (ev: string) =>
-    (settings.hooks?.[ev] ?? []).some((h: any) => (h.hooks ?? []).some((x: any) => String(x.command ?? "").includes(HOOK_MARKER)));
+  const settings = readClaudeSettings();
+  const hasOurs = (ev: string) => hasCockpitHook(settings, ev);
 
   if (args.includes("--install")) {
     const missing = HOOK_EVENTS.filter((ev) => !hasOurs(ev));
@@ -405,7 +587,10 @@ function cmdAudit(): void {
 function help(): void {
   console.log(`${bold("cockpit")} — local project cockpit
 
-  cockpit list                      all projects, one status line each
+  cockpit                           open the dashboard (starts it — or, first time,
+                                    installs it as a login item — if it isn't up)
+  cockpit doctor                    why isn't the dashboard there? one-screen check
+  cockpit list                     all projects, one status line each
   cockpit status <project>          full picture: git, tmux, services, actions
   cockpit go <project>              attach-or-create the project tmux session
                                     (native iTerm2 tabs by default in iTerm2;
@@ -416,7 +601,8 @@ function help(): void {
   cockpit hooks [--install|--uninstall]
                                     precise agent events via Claude Code hooks
                                     (opt-in; without them detection is heuristic)
-  cockpit dash [port]               start the dashboard (default http://localhost:4400)
+  cockpit dash [port]               run the dashboard in this terminal (default
+                                    http://localhost:4400; says so if already up)
   cockpit dash --host <ip>          bind beyond localhost (e.g. a Tailscale IP);
                                     enforces bearer-token auth — docs/remote-access.md
   cockpit dash --token <t>          override the token (default: ~/.project-cockpit/token)
@@ -450,26 +636,12 @@ switch (cmd) {
   case "_hook-event": await cmdHookEvent(); break;
   case "open": cmdOpen(args[0] ?? die("usage: cockpit open <project> <target>"), args[1]); break;
   case "run": await cmdRun(args[0] ?? die("usage: cockpit run <project> <action>"), args[1]); break;
-  case "dash": {
-    const port = Number(args.find((a) => /^\d+$/.test(a))) || 4400;
-    const flagVal = (name: string) => {
-      const i = args.indexOf(name);
-      return i >= 0 ? args[i + 1] : undefined;
-    };
-    const host = flagVal("--host");
-    const token = flagVal("--token");
-    if (args.includes("--install")) { installLaunchAgent(port, host); break; }
-    if (args.includes("--uninstall")) { uninstallLaunchAgent(); break; }
-    const { startServer } = await import("./server.ts");
-    startServer(port, { host, token });
-    // Only auto-open when the plain localhost URL will actually work (no token
-    // in play) — otherwise the server has printed the tokened login URL.
-    const tokenInPlay = token || process.env.COCKPIT_TOKEN || (host && !["127.0.0.1", "localhost", "::1"].includes(host));
-    if (process.stdout.isTTY && !tokenInPlay) sh("open", [`http://localhost:${port}`]);
-    break;
-  }
+  case "dash": await cmdDash(args); break;
+  case "doctor": await cmdDoctor(); break;
   case "add": cmdAdd(args[0]); break;
   case "audit": cmdAudit(); break;
-  case undefined: case "help": case "-h": case "--help": help(); break;
+  // No args in a terminal = "show me my projects"; piped/scripted keeps printing help.
+  case undefined: if (process.stdout.isTTY) await cmdHome(); else help(); break;
+  case "help": case "-h": case "--help": help(); break;
   default: die(`unknown command "${cmd}" — try: cockpit help`);
 }

@@ -98,10 +98,11 @@ Goal: the cockpit becomes the first screen of the day — a cross-project TODO l
 
 ### Phase A — zero-effort start
 
-- [ ] `cockpit` with no args opens the dashboard in the browser (installs/starts the launchd agent if missing, otherwise just opens the URL)
-- [ ] `cockpit dash` detects a server already listening on the port and says so (with the URL) instead of failing on a busy port
-- [ ] `cockpit doctor`: one-screen check — agent loaded, port answering, plist points at this checkout, hooks installed
-- [ ] README quick-start leads with the single `cockpit` command
+- [x] `cockpit` with no args opens the dashboard in the browser (installs/starts the launchd agent if missing, otherwise just opens the URL)
+- [x] `cockpit dash` detects a server already listening on the port and says so (with the URL) instead of failing on a busy port
+- [x] `cockpit doctor`: one-screen check — agent loaded, port answering, plist points at this checkout, hooks installed
+- [x] README quick-start leads with the single `cockpit` command (2026-10-18)
+- [x] follow-up found while testing: `cockpit dash --install` as a reinstall failed ("Bootstrap failed: 5" — bootout is async); now waits for the unload and retries (2026-10-18)
 
 ### Phase B — roots & discovery
 
