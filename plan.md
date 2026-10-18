@@ -41,7 +41,7 @@
 
 ### Open-sourcing polish
 
-- [ ] first-run empty state: welcome card on dashboard + friendly `cockpit list` when registry is empty
+- [x] first-run empty state: welcome card on dashboard + friendly `cockpit list` when registry is empty → done in Phase F (2026-10-18)
 - [x] genericize the 3 ai-foundation references in hint strings (inline a minimal config example) (2026-07-16)
 - [x] LICENSE (MIT) + README screenshots + install one-liner — screenshots from a COCKPIT_DIR demo registry, no real project data (2026-07-16)
 - [x] caveats section: macOS-only bits (open, launchd, iTerm2 -CC), agent detection is best-effort — plus trust model and reboot behavior (2026-07-16)
@@ -66,7 +66,7 @@
 
 ### Cockpit v1.5 (carried from ai-foundation plan)
 
-- [ ] checkbox toggling from the dashboard Plan card
+- [x] checkbox toggling from the dashboard Plan card → from the home screen tiles and work lists (Phase C); the detail page's Plan card still links out (2026-10-18)
 - [ ] "open plan in Cursor/Obsidian" button
 - [ ] macOS notifications for attention items (only if dashboard-glancing proves insufficient)
 
@@ -106,38 +106,44 @@ Goal: the cockpit becomes the first screen of the day — a cross-project TODO l
 
 ### Phase B — roots & discovery
 
-- [ ] `roots:` in registry — parent folders scanned for project sub-folders (git repo, plan.md, or markdown-only)
-- [ ] not every sub-folder auto-onboards: unregistered ones listed under a collapsed "Other sub-folders" with one-click add / ignore
-- [ ] content projects (`kind: content`): markdown-only folders (e.g. Knowledge-share/*); activity from file mtimes, no git required; optional publish target (local / Bookatlas cloud public / private)
-- [ ] read `ABOUT.md` (heading = tagline, paragraph = description) for tile headings and detail page; click-to-edit writes back the same file; missing file → offer a drafted one, never write unasked
+- [x] `roots:` in registry — parent folders scanned for project sub-folders (git repo, plan.md, or markdown-only) (2026-10-18)
+- [x] not every sub-folder auto-onboards: unregistered ones listed under a collapsed "Other sub-folders" with one-click add / ignore (2026-10-18)
+- [x] content projects (`kind: content`): markdown-only folders (e.g. Knowledge-share/*); activity from file mtimes, no git required; optional publish target (local / Bookatlas cloud public / private) → kind + mtime activity + no-git handling done; the publish target is split out below (2026-10-18)
+- [x] read `ABOUT.md` (heading = tagline, paragraph = description) for tile headings and detail page; click-to-edit writes back the same file; missing file → offer a drafted one, never write unasked (2026-10-18)
 
 ### Phase C — TODO home screen
 
-- [ ] home = work list aggregated from every project's plan.md open tickets + open Direction questions (planning/ and CHANGELOG as context, not items)
-- [ ] add a ticket from the UI into a chosen project's plan.md section (single appended line, spec-compliant)
-- [ ] per-project drag reorder of open tickets inside one section — writes plan.md as a minimal line move; needs a plan-md spec note that order = priority
-- [ ] global queue = portfolio.md `## Up next`; drag to reorder, stale lines (ticket no longer matches plan.md) flagged — blocked on the portfolio.md Direction question
-- [ ] check a ticket off from the home list (covers "checkbox toggling from the dashboard Plan card")
+- [x] home = work list aggregated from every project's plan.md open tickets + open Direction questions (planning/ and CHANGELOG as context, not items) (2026-10-18)
+- [x] add a ticket from the UI into a chosen project's plan.md section (single appended line, spec-compliant) (2026-10-18)
+- [x] per-project drag reorder of open tickets inside one section — writes plan.md as a minimal line move; needs a plan-md spec note that order = priority → plus ▲▼ for touch; spec v1.1 sanctions priority moves (2026-10-18)
+- [x] global queue = portfolio.md `## Up next`; drag to reorder, stale lines (ticket no longer matches plan.md) flagged — blocked on the portfolio.md Direction question → built on the draft portfolio.md format; reshape if the Direction answer changes it (2026-10-18)
+- [x] check a ticket off from the home list (covers "checkbox toggling from the dashboard Plan card") (2026-10-18)
 
 ### Phase D — statuses & filters
 
-- [ ] derived statuses: Needs you · Running · Active (<7d) · Cooling (7–30d) · Dormant (30d+) · Unplanned (no open tickets) · Done; Parked/Archived only from portfolio.md
-- [ ] filter chips (All / Needs you / Active / …) + "Filters" checkbox dropdown (status, kind code/content); choice kept in the URL
-- [ ] filtered view shows the actionable items behind the filter (questions to answer, manual commands, your tasks, agent asks) with checkboxes — manual, or auto-checked when the underlying state clears
-- [ ] mismatch hints: portfolio bucket vs real activity (Now but Dormant, Parked but Active); `Reviewed:` older than 7 days → a Needs-you item
+- [x] derived statuses: Needs you · Running · Active (<7d) · Cooling (7–30d) · Dormant (30d+) · Unplanned (no open tickets) · Done; Parked/Archived only from portfolio.md (2026-10-18)
+- [x] filter chips (All / Needs you / Active / …) + "Filters" checkbox dropdown (status, kind code/content); choice kept in the URL (2026-10-18)
+- [x] filtered view shows the actionable items behind the filter (questions to answer, manual commands, your tasks, agent asks) with checkboxes — manual, or auto-checked when the underlying state clears (2026-10-18)
+- [x] mismatch hints: portfolio bucket vs real activity (Now but Dormant, Parked but Active); `Reviewed:` older than 7 days → a Needs-you item (2026-10-18)
 
 ### Phase E — Ideate & Plan actions
 
-- [ ] plan-md spec v1.1 in ai-foundation: optional `## Ideas` section (bullets, no checkboxes) — spec first, parser second
-- [ ] Ideate: type or paste ideas into `## Ideas`, or launch a briefed Claude session (existing tmux "start implementation" path) that proposes ideas for you to accept
-- [ ] Plan: promote an idea to a feature with tickets — typed, pasted, or drafted by a briefed session; nothing written to plan.md without your confirm
-- [ ] tile button row stays one line: Ideate · Plan · Terminal · Open (counts on a small line above)
+- [x] plan-md spec v1.1 in ai-foundation: optional `## Ideas` section (bullets, no checkboxes) — spec first, parser second (2026-10-18)
+- [x] Ideate: type or paste ideas into `## Ideas`, or launch a briefed Claude session (existing tmux "start implementation" path) that proposes ideas for you to accept → headless `claude -p` suggestions you tick, or a live tmux session (2026-10-18)
+- [x] Plan: promote an idea to a feature with tickets — typed, pasted, or drafted by a briefed session; nothing written to plan.md without your confirm (2026-10-18)
+- [x] tile button row stays one line: Ideate · Plan · Terminal · Open (counts on a small line above) (2026-10-18)
 
 ### Phase F — gentle onboarding for new users
 
-- [ ] first-run with empty registry: one welcome card → "pick a folder with your projects" (feeds Phase B roots); absorbs the open-sourcing empty-state ticket above
-- [ ] progressive disclosure: hooks, remote access, portfolio, foundation links each appear as a dismissible "next step" only once the basics are in use
-- [ ] demo registry (`COCKPIT_DIR`) documented as "try it without touching your projects"
+- [x] first-run with empty registry: one welcome card → "pick a folder with your projects" (feeds Phase B roots); absorbs the open-sourcing empty-state ticket above → welcome card + scan-a-folder; `cockpit list` empty state points at it (2026-10-18)
+- [x] progressive disclosure: hooks, remote access, portfolio, foundation links each appear as a dismissible "next step" only once the basics are in use → "Next steps" card, two at a time, dismissible; foundation links not included yet (2026-10-18)
+- [x] demo registry (`COCKPIT_DIR`) documented as "try it without touching your projects" → became `cockpit demo` — sandbox projects on port 4401 (2026-10-18)
+- [ ] follow-up: content projects' publish target (local / Bookatlas cloud public / private) — shown on the tile, wired to bookatlas upload
+- [ ] follow-up: detail page Plan card shows `## Ideas` and offers check/reorder like the home tiles
+- [ ] follow-up: Terminal button verified end-to-end in iTerm2 (osascript path); first use may prompt macOS automation permission
+- [ ] follow-up: `cockpit list` shows the derived status column
+- [ ] follow-up: tickets are addressed by text — two identical open tickets in one feature always resolve to the first (check/move); add a line hint if it bites
+- [x] follow-up: home-screen screenshot in the README (from `cockpit demo`) (2026-10-18)
 
 ### Security audit (redesign)
 

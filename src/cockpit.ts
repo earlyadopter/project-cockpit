@@ -17,6 +17,7 @@ import {
 } from "./state.ts";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
+import { effectiveRoots, setRoot } from "./home.ts";
 import { fileURLToPath } from "node:url";
 
 // ---------- output helpers ----------
@@ -76,15 +77,16 @@ async function cmdList(): Promise<void> {
   if (projects.length === 0) {
     console.log(`${bold("cockpit")} — no projects registered yet.
 
-  Register your first project (a git repo, or any folder you work in):
+  Easiest: open the dashboard and point it at the folder that holds your projects —
+  it lists the sub-folders and you pick which ones to add:
+
+    cockpit                           opens http://localhost:4400
+
+  Or register one from here (a git repo, or any folder you work in):
 
     cockpit add ~/projects/my-app     # or: cd into it and just \`cockpit add\`
 
-  Then:
-
-    cockpit list        this view — one live status line per project
-    cockpit go my-app   tmux workspace with dev / agent / shell windows
-    cockpit dash        the dashboard, at http://localhost:4400
+  Just looking?  cockpit demo        sample projects in a sandbox; touches nothing of yours
 `);
     return;
   }
@@ -447,6 +449,38 @@ async function cmdDash(args: string[]): Promise<void> {
   if (process.stdout.isTTY && !tokenInPlay) sh("open", [`http://localhost:${port}`]);
 }
 
+// `cockpit demo [port]`: sample projects in a sandbox COCKPIT_DIR, served on its own
+// port. Your registry, plans and login agent are never touched.
+async function cmdDemo(args: string[]): Promise<void> {
+  const port = Number(args.find((a) => /^\d+$/.test(a))) || 4401;
+  const { makeDemo } = await import("./demo.ts");
+  const dir = join(COCKPIT_DIR + "-demo");
+  const state = makeDemo(dir);
+  console.log(`demo projects: ${dir}/projects  (rebuilt on every run)`);
+  const serverPath = fileURLToPath(new URL("./server.ts", import.meta.url));
+  const child = Bun.spawn([process.execPath, serverPath, String(port)], {
+    env: { ...process.env, COCKPIT_DIR: state, COCKPIT_TOKEN: "" }, stdout: "inherit", stderr: "inherit",
+  });
+  if (await waitUntilUp({ port }, 8000)) { if (process.stdout.isTTY) sh("open", [`http://localhost:${port}`]); }
+  else console.error("demo server did not come up — see the output above");
+  await child.exited;
+}
+
+// `cockpit roots [add|rm <path>]`: folders whose sub-folders the dashboard offers as projects.
+function cmdRoots(args: string[]): void {
+  const [op, path] = args;
+  if (op === "add" || op === "rm") {
+    if (!path) die(`usage: cockpit roots ${op} <path>`);
+    const r = setRoot(path, op === "add");
+    if (!r.ok) die(r.error!);
+    console.log(`${op === "add" ? "scanning" : "stopped scanning"} ${r.path}`);
+    return;
+  }
+  const roots = effectiveRoots();
+  if (!roots.length) { console.log(`no roots yet — cockpit roots add <folder-of-projects>`); return; }
+  for (const r of roots) console.log(`${r.path}${r.explicit ? "" : dim("  (parent of registered projects)")}`);
+}
+
 // `cockpit doctor`: one screen answering "why isn't my dashboard there?"
 async function cmdDoctor(): Promise<void> {
   type Level = "ok" | "warn" | "fail";
@@ -610,6 +644,8 @@ function help(): void {
                                     combines with --host)
   cockpit dash --uninstall          remove the login auto-start
   cockpit add [path]                register a project (default: cwd)
+  cockpit roots [add|rm <path>]     folders whose sub-folders the dashboard offers
+  cockpit demo [port]               try it on sample projects (sandbox, port 4401)
   cockpit audit                     print the audit log
 
   registry: ${REGISTRY_FILE}
@@ -638,6 +674,8 @@ switch (cmd) {
   case "run": await cmdRun(args[0] ?? die("usage: cockpit run <project> <action>"), args[1]); break;
   case "dash": await cmdDash(args); break;
   case "doctor": await cmdDoctor(); break;
+  case "demo": await cmdDemo(args); break;
+  case "roots": cmdRoots(args); break;
   case "add": cmdAdd(args[0]); break;
   case "audit": cmdAudit(); break;
   // No args in a terminal = "show me my projects"; piped/scripted keeps printing help.

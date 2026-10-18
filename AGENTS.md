@@ -11,8 +11,8 @@ Local project cockpit: a CLI (`cockpit`) + localhost dashboard for working on ma
 | Action | Command |
 |---|---|
 | Install | `bun install` (no build step — bun runs the TS directly) |
-| Run dashboard | `bun src/server.ts 4400` (or `cockpit dash`) |
-| Test | none yet — verify by driving CLI + curl on the API |
+| Run dashboard | `cockpit` (opens it; starts/installs the launchd agent if needed) · foreground: `cockpit dash` · sandbox: `cockpit demo` |
+| Test | `bun test` (plan.md / portfolio.md writes) — plus drive the CLI, curl the API, and `cockpit demo` for the UI |
 | CLI | `./bin/cockpit` (symlinked to `~/.local/bin/cockpit`) |
 
 ## Key directories
@@ -21,7 +21,11 @@ Local project cockpit: a CLI (`cockpit`) + localhost dashboard for working on ma
 |---|---|
 | `src/state.ts` | shared state layer — registry, config, git/tmux/agent detection, plan.md, actions. CLI and server must both use it |
 | `src/cockpit.ts` | the CLI (list/status/go/open/run/dash/add/audit) |
-| `src/server.ts` | dashboard: Bun.serve API + single-page UI in the PAGE template literal |
+| `src/server.ts` | dashboard: Bun.serve API + project detail page (`/project`) in the PAGE template literal |
+| `src/home.ts` | home-screen layer: roots/discovery, ABOUT.md, portfolio.md, derived statuses, surgical plan.md writes, Ideate/Plan `claude -p` |
+| `src/ui/home.{html,css,js}` | home screen (`/`), inlined by `src/home-page.ts` at startup — restart after editing |
+| `src/demo.ts` | `cockpit demo` sandbox projects |
+| `test/` | `bun test` — write paths checked against exact expected file text |
 
 ## AI context files
 
@@ -48,7 +52,7 @@ Read and follow the rules in `.ai/rules/`. Key rules:
 ## Project-specific instructions
 
 ### Architecture invariants
-- **Never cache live state.** Every request/command recomputes from `git`, `tmux`, `lsof`, and the filesystem. The only persistent state: `~/.project-cockpit/registry.yml` (project paths), `audit.log` (append-only), `agent-events.log` (hook-event signal buffer, size-capped), and `token` (dashboard bearer token, 0600).
+- **Never cache live state.** Every request/command recomputes from `git`, `tmux`, `lsof`, and the filesystem. The only persistent state: `~/.project-cockpit/registry.yml` (project paths, plus `roots:` to scan and `ignored:` sub-folders), `portfolio.md` (cross-project priority — the user's file, edited line by line like plan.md), `audit.log` (append-only), `agent-events.log` (hook-event signal buffer, size-capped), and `token` (dashboard bearer token, 0600).
 - **Safety tiers are enforced server-side** (`safe` runs, `confirm` requires explicit acknowledgment, `manual` is always refused with a copy-paste command). Never let a UI change weaken this.
 - **plan.md edits are surgical single-line changes** — never reorder or rewrite the file.
 - The dashboard binds `127.0.0.1` by default and rejects cross-origin non-GET. Any non-loopback bind (`--host`) must keep enforcing bearer-token auth on every request (`docs/remote-access.md`); never let a change weaken that or default the bind wider.

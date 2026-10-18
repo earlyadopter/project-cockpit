@@ -38,11 +38,24 @@ cockpit dash [port]               run the dashboard in this terminal instead (sa
 
 The tabs organize; they don't automate. The two exceptions where the *cockpit* does the typing: actions declared with `window:` are sent into their tmux tab, and the dashboard's "start implementation" opens a fourth `impl` tab with Claude already running. The payoff is uniformity: same three drawers in every project, and closing the window throws away nothing.
 
-## Dashboard (Phase 2 + 3)
+## Home screen: one work list across projects
+
+![The home screen, on `cockpit demo` sample projects](docs/screenshot-home.png)
+
+`cockpit` opens the home screen — what needs you, what's next, what's running, across every project:
+
+- **Status per project**, derived live, never set by hand: *Needs you* (an agent is waiting or a Direction question is open) · *Running* (a Claude session is working) · *Active* (open tickets, activity in the last 7 days) · *Cooling* (7–30 days quiet) · *Unplanned* (recent activity, nothing queued in plan.md) · *Dormant* (30+ days) · *Done* (every ticket checked, quiet a week) · *Parked* (you said so in portfolio.md).
+- **Filters**: one click on a status chip (⌘/shift-click to combine), or the Filters menu (status + kind: code / content). A filtered view turns into a **to-do list** of what those projects need from you — questions to answer, commands to run by hand, tickets, agents waiting — with checkboxes. Ticking a ticket checks it in plan.md; everything else ticks itself once the state clears (pushed, committed, answered). The filter lives in the URL, so a view can be bookmarked.
+- **Priorities, two levels.** Inside a project, open tickets are ordered most-important-first in plan.md (drag them, or ▲▼). Across projects, `~/.project-cockpit/portfolio.md` holds **Now** (at most 3) / **Next** / **Later** / **Parked** buckets — drag a tile between groups — and an **Up next** queue of `project :: ticket` lines, the handful of tickets that matter this week. The home screen flags drift: a project in Now that went quiet, a Parked one that's busy, a queue entry whose ticket is gone, a weekly review that's overdue.
+- **Tiles**: tagline from the project's `ABOUT.md` (click to edit — heading = short tagline, first paragraph = description; it's a plain file you can edit anywhere), last activity, the next ticket (click for the full list: check, reorder, add), and **Ideate · Plan · Terminal · Open**. *Ideate* keeps ideas in plan.md under `## Ideas` — typed, pasted, or suggested by Claude (headless `claude -p`; nothing written until you pick). *Plan* turns an idea into a feature with tickets — typed, or drafted by Claude for you to edit. Both can also open a live, attended Claude session instead. *Terminal* raises the project's tmux session in iTerm2 (creating it if needed). *Open* is the project detail page below.
+- **Discovery**: *Other sub-folders* lists folders next to your projects (plus any folder you add with `cockpit roots add <path>` or the scan box) that aren't registered yet — git repos, code folders, and markdown-only **content** projects (notes, a book) alike. Nothing is added until you click; *ignore* hides one for good; a folder of folders can be scanned inside.
+- **New here?** An empty registry shows a welcome card that asks for the folder holding your projects. `cockpit demo` runs the whole thing on sample projects in a sandbox (`~/.project-cockpit-demo`, port 4401) without touching your registry.
+
+## Project detail (Phase 2 + 3)
 
 ![The cockpit dashboard](docs/screenshot-dashboard.png)
 
-`cockpit dash` starts a web UI on `localhost:4400` and opens it in the browser: a project sidebar (needs-attention first) and per-project collapsible cards — Git, Workspace (tmux + ports), Deploy (date of the last push to origin's default branch — the "last PROD deploy" proxy for push-to-deploy projects), Recent commits, Changelog (auto-detected, or set `changelog:` in the repo config), and Actions. Light/dark follows the system. Refreshes every 10s; every request recomputes live state — stop and restart it freely, there is nothing to lose.
+`/project#<name>` (the **Open** button) is the per-project view: a project sidebar (needs-attention first) and per-project collapsible cards — Git, Workspace (tmux + ports), Deploy (date of the last push to origin's default branch — the "last PROD deploy" proxy for push-to-deploy projects), Recent commits, Changelog (auto-detected, or set `changelog:` in the repo config), and Actions. Light/dark follows the system. Refreshes every 10s; every request recomputes live state — stop and restart it freely, there is nothing to lose.
 
 Phase 3 additions:
 
@@ -72,7 +85,7 @@ Rendering rules (the file is never reordered — checkboxes are the status): don
 
 The foundation's docs rule tells Claude Code to keep the checkboxes current as it completes work, and the `plan.md` template ships with the base manifest. `cockpit status` shows a one-line summary.
 
-The convention is a versioned spec — `docs/plan-md-spec.md` in the [ai-foundation] repo (this parser targets **v1.0**). The two projects stay separate but linked by contract: if a registered project carries a foundation install marker (`.ai/foundation-version.md`), the dashboard compares it with the foundation repo's current manifest and raises a "foundation vX → vY available" attention chip with audit/refresh commands; "Add project" offers the onboard command for repos that don't have the foundation yet. No foundation repo registered → all of this silently disappears.
+The convention is a versioned spec — `docs/plan-md-spec.md` in the [ai-foundation] repo (this parser targets **v1.1**: `## Ideas` and priority order of open tickets). The two projects stay separate but linked by contract: if a registered project carries a foundation install marker (`.ai/foundation-version.md`), the dashboard compares it with the foundation repo's current manifest and raises a "foundation vX → vY available" attention chip with audit/refresh commands; "Add project" offers the onboard command for repos that don't have the foundation yet. No foundation repo registered → all of this silently disappears.
 
 ## Agent visibility (Phase 4)
 
