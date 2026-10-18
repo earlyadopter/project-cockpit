@@ -54,9 +54,11 @@ export function loadRegistry(): string[] {
   return doc?.projects ?? [];
 }
 
+// The registry also holds `roots:` and `ignored:` (home.ts) — keep every key we don't own.
 export function saveRegistry(paths: string[]): void {
   mkdirSync(COCKPIT_DIR, { recursive: true });
-  writeFileSync(REGISTRY_FILE, yamlDump({ projects: paths }));
+  const doc = existsSync(REGISTRY_FILE) ? ((yamlLoad(readFileSync(REGISTRY_FILE, "utf8")) as Record<string, unknown> | null) ?? {}) : {};
+  writeFileSync(REGISTRY_FILE, yamlDump({ ...doc, projects: paths }));
 }
 
 export function loadProject(root: string): Project {
@@ -593,13 +595,16 @@ export function readAudit(maxLines = 200): string {
 }
 
 // ---------- plan.md (features / tickets / direction) ----------
-// Convention: `## Direction` holds checkbox questions (checked = answered);
-// `## Features` holds `### <feature>` blocks with checkbox tickets.
+// Convention (spec v1.1 in ai-foundation docs/plan-md-spec.md): `## Direction` holds
+// checkbox questions (checked = answered); `## Ideas` holds plain bullets (not yet
+// work); `## Features` holds `### <feature>` blocks with checkbox tickets, open
+// tickets ordered by priority. `line` is the 0-based line number, for surgical writes.
 // The file is the source of truth; strike-through/sorting are rendering rules only.
 
-export interface PlanItem { done: boolean; text: string }
-export interface PlanFeature { name: string; tickets: PlanItem[] }
-export interface Plan { path: string; direction: PlanItem[]; features: PlanFeature[] }
+export interface PlanItem { done: boolean; text: string; line: number }
+export interface PlanFeature { name: string; tickets: PlanItem[]; line: number }
+export interface PlanIdea { text: string; planned: boolean; line: number }
+export interface Plan { path: string; direction: PlanItem[]; features: PlanFeature[]; ideas: PlanIdea[]; ideasLine: number | null }
 
 const PLAN_CANDIDATES = ["plan.md", "PLAN.md", "planning/plan.md"];
 
@@ -611,33 +616,41 @@ export function readPlan(p: Project): Plan | null {
     // Tolerant parsing: `## Direction` checkboxes are questions; ### blocks
     // anywhere are features; checkboxes sitting directly under any other H2
     // (e.g. "## Ready to start now") form an implicit feature named after it.
-    const plan: Plan = { path: rel, direction: [], features: [] };
-    let section: "direction" | "other" = "other";
+    const plan: Plan = { path: rel, direction: [], features: [], ideas: [], ideasLine: null };
+    let section: "direction" | "ideas" | "other" = "other";
     let sectionTitle = "";
     let feature: PlanFeature | null = null;
     let implicit: PlanFeature | null = null;
-    for (const line of readFileSync(full, "utf8").split("\n")) {
+    const lines = readFileSync(full, "utf8").split("\n");
+    for (let ln = 0; ln < lines.length; ln++) {
+      const line = lines[ln];
       const h2 = line.match(/^##(?!#)\s+(.+)/);
       if (h2) {
         sectionTitle = h2[1].trim();
-        section = /^direction/i.test(sectionTitle) ? "direction" : "other";
+        section = /^direction/i.test(sectionTitle) ? "direction" : /^ideas\b/i.test(sectionTitle) ? "ideas" : "other";
+        if (section === "ideas") plan.ideasLine = ln;
         feature = null;
         implicit = null;
         continue;
       }
       const h3 = line.match(/^###\s+(.+)/);
       if (h3) {
-        feature = { name: h3[1].trim(), tickets: [] };
+        feature = { name: h3[1].trim(), tickets: [], line: ln };
         plan.features.push(feature);
         continue;
       }
       const cb = line.match(/^\s*[-*]\s*\[( |x|X)\]\s+(.+)/);
-      if (!cb) continue;
-      const item = { done: cb[1].toLowerCase() === "x", text: cb[2].trim() };
+      if (!cb) {
+        // Ideas are plain top-level bullets; "→ planned as" marks one promoted to a feature.
+        const idea = section === "ideas" && !feature ? line.match(/^[-*]\s+(.+)/) : null;
+        if (idea) plan.ideas.push({ text: idea[1].trim(), planned: /→ planned as /.test(idea[1]), line: ln });
+        continue;
+      }
+      const item = { done: cb[1].toLowerCase() === "x", text: cb[2].trim(), line: ln };
       if (section === "direction") { plan.direction.push(item); continue; }
       if (feature) { feature.tickets.push(item); continue; }
       if (!implicit) {
-        implicit = { name: sectionTitle && !/^features$/i.test(sectionTitle) ? sectionTitle : "Tickets", tickets: [] };
+        implicit = { name: sectionTitle && !/^features$/i.test(sectionTitle) ? sectionTitle : "Tickets", tickets: [], line: ln };
         plan.features.push(implicit);
       }
       implicit.tickets.push(item);
