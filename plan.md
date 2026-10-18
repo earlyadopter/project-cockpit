@@ -7,6 +7,7 @@
 - [x] Remote access: Tailscale + --host + token first, chat-bot bridge later? → yes, allow remote access, and document how to set it up for the users in the open-source project (decided 2026-07-09)
 - [x] Monetize? → no: stays open-source/free; credibility first, not a few extra dollars (decided 2026-07-16)
 - [x] Marketing & positioning: how to promote the cockpit and articulate what problem it solves (multi-project AI-assisted work needs one attention surface; observe-only + server-side safety tiers as the differentiator vs the notch session monitors) → position one level above the crowded session-monitor category ("mission control for a portfolio of AI-assisted projects"); attention/safety/plan.md as the three pillars; essay-then-Show-HN launch sequence — full strategy + copy drafts: planning/marketing-positioning.md (decided 2026-07-16)
+- [ ] Cross-project priority: adopt `~/.project-cockpit/portfolio.md` (Now ≤3 / Next / Later / Parked buckets + `## Up next` queue of `project :: ticket` lines + weekly `Reviewed:` date) as the one file the dashboard reads and drags? Draft exists, format awaiting sign-off (proposed 2026-10-18)
 
 ## Features
 
@@ -90,3 +91,64 @@
 - [x] emoji statuses (✳/✋) replaced by status dot + short label ("Working", "Waiting on you · 10m · 2 sessions")
 - [x] attention chips as soft tinted amber pills; actions as aligned rows with uppercase tier badges and quiet run buttons
 - [ ] hover tooltip is the only path to full ticket text — consider click-to-expand for touch devices (no hover on phones)
+
+## Back-in-the-habit redesign (session 2026-10-18; mockup: claude.ai/artifact/KnhyN9SjtAEJtKqWazBy2b)
+
+Goal: the cockpit becomes the first screen of the day — a cross-project TODO list, not a status wall. Phases ship independently, in order.
+
+### Phase A — zero-effort start
+
+- [ ] `cockpit` with no args opens the dashboard in the browser (installs/starts the launchd agent if missing, otherwise just opens the URL)
+- [ ] `cockpit dash` detects a server already listening on the port and says so (with the URL) instead of failing on a busy port
+- [ ] `cockpit doctor`: one-screen check — agent loaded, port answering, plist points at this checkout, hooks installed
+- [ ] README quick-start leads with the single `cockpit` command
+
+### Phase B — roots & discovery
+
+- [ ] `roots:` in registry — parent folders scanned for project sub-folders (git repo, plan.md, or markdown-only)
+- [ ] not every sub-folder auto-onboards: unregistered ones listed under a collapsed "Other sub-folders" with one-click add / ignore
+- [ ] content projects (`kind: content`): markdown-only folders (e.g. Knowledge-share/*); activity from file mtimes, no git required; optional publish target (local / Bookatlas cloud public / private)
+- [ ] read `ABOUT.md` (heading = tagline, paragraph = description) for tile headings and detail page; click-to-edit writes back the same file; missing file → offer a drafted one, never write unasked
+
+### Phase C — TODO home screen
+
+- [ ] home = work list aggregated from every project's plan.md open tickets + open Direction questions (planning/ and CHANGELOG as context, not items)
+- [ ] add a ticket from the UI into a chosen project's plan.md section (single appended line, spec-compliant)
+- [ ] per-project drag reorder of open tickets inside one section — writes plan.md as a minimal line move; needs a plan-md spec note that order = priority
+- [ ] global queue = portfolio.md `## Up next`; drag to reorder, stale lines (ticket no longer matches plan.md) flagged — blocked on the portfolio.md Direction question
+- [ ] check a ticket off from the home list (covers "checkbox toggling from the dashboard Plan card")
+
+### Phase D — statuses & filters
+
+- [ ] derived statuses: Needs you · Running · Active (<7d) · Cooling (7–30d) · Dormant (30d+) · Unplanned (no open tickets) · Done; Parked/Archived only from portfolio.md
+- [ ] filter chips (All / Needs you / Active / …) + "Filters" checkbox dropdown (status, kind code/content); choice kept in the URL
+- [ ] filtered view shows the actionable items behind the filter (questions to answer, manual commands, your tasks, agent asks) with checkboxes — manual, or auto-checked when the underlying state clears
+- [ ] mismatch hints: portfolio bucket vs real activity (Now but Dormant, Parked but Active); `Reviewed:` older than 7 days → a Needs-you item
+
+### Phase E — Ideate & Plan actions
+
+- [ ] plan-md spec v1.1 in ai-foundation: optional `## Ideas` section (bullets, no checkboxes) — spec first, parser second
+- [ ] Ideate: type or paste ideas into `## Ideas`, or launch a briefed Claude session (existing tmux "start implementation" path) that proposes ideas for you to accept
+- [ ] Plan: promote an idea to a feature with tickets — typed, pasted, or drafted by a briefed session; nothing written to plan.md without your confirm
+- [ ] tile button row stays one line: Ideate · Plan · Terminal · Open (counts on a small line above)
+
+### Phase F — gentle onboarding for new users
+
+- [ ] first-run with empty registry: one welcome card → "pick a folder with your projects" (feeds Phase B roots); absorbs the open-sourcing empty-state ticket above
+- [ ] progressive disclosure: hooks, remote access, portfolio, foundation links each appear as a dismissible "next step" only once the basics are in use
+- [ ] demo registry (`COCKPIT_DIR`) documented as "try it without touching your projects"
+
+### Security audit (redesign)
+
+- Auth surfaces: unchanged — loopback bind, cross-origin non-GET rejected, bearer token on any `--host` bind. Every new write route (add ticket, reorder, ABOUT edit, portfolio drag, roots add) is a non-GET and goes through the same checks.
+- Injection paths: ticket/idea/ABOUT text is user-supplied and written into markdown, then rendered in the page — escape on render, reject newlines in single-line writes so one input can't inject sections. Roots and discovered paths must be realpath-resolved and stay under a registered root (no `../` escapes, no symlink walk-outs).
+- Agent launch (Ideate/Plan sessions) reuses the existing confirm-tier start path; brief text is passed as a file, never interpolated into a shell command.
+- Secrets: none added. Discovery must not read `.env*` or follow into `node_modules`/`.git`.
+- Unauthenticated stranger: on default bind, nothing reachable; on remote bind, same token gate as today.
+
+### Projected expenses audit (redesign)
+
+- Local-only app: $0 hosting, $0 egress, no metered quotas. No crawlers/bots can reach a loopback service.
+- Only spend: Ideate/Plan sessions run in the user's own Claude Code subscription — no API key, no per-call billing added by the cockpit. Quota pill + pre-dispatch warning (already built) cover the one meter.
+- Local cost to watch: discovery scans and per-request recompute across 50+ folders — cap scan depth, skip heavy dirs, keep the 6s per-subprocess timeout.
+
