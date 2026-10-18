@@ -3,4 +3,15 @@
 set -euo pipefail
 SELF="$(readlink -f "${BASH_SOURCE[0]}")"
 if [ -x "$HOME/.bun/bin/bun" ]; then BUN="$HOME/.bun/bin/bun"; else BUN="bun"; fi
-exec "$BUN" "$(dirname "$SELF")/../src/cockpit.ts" "$@"
+SRC="$(dirname "$SELF")/../src/cockpit.ts"
+# Hook events are best-effort and fire constantly; a transient bad read of the
+# sources (Dropbox sync can serve truncated files) must not surface as a hook
+# error in every Claude session. Retry once; only a repeat failure propagates.
+if [ "${1:-}" = "_hook-event" ]; then
+  STDIN="$(cat)"
+  printf '%s' "$STDIN" | "$BUN" "$SRC" "$@" 2>/dev/null && exit 0
+  sleep 1
+  printf '%s' "$STDIN" | "$BUN" "$SRC" "$@"
+  exit $?
+fi
+exec "$BUN" "$SRC" "$@"

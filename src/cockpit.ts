@@ -289,6 +289,9 @@ function installLaunchAgent(port: number, host?: string): void {
   </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
+  <!-- launchd jobs default to NOT materializing dataless (cloud-evicted) files;
+       reads of Dropbox "online-only" plan.md/CHANGELOG.md/.git/HEAD then fail with EDEADLK. -->
+  <key>MaterializeDatalessFiles</key><true/>
   <key>EnvironmentVariables</key><dict>
     <key>PATH</key><string>${process.env.HOME}/.local/bin:${process.env.HOME}/.bun/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
   </dict>

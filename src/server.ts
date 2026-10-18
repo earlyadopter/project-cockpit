@@ -48,6 +48,24 @@ async function projectSummary(p: Project, cwds: Awaited<ReturnType<typeof claude
   };
 }
 
+// One project with an unreadable file (e.g. a Dropbox online-only plan.md —
+// EDEADLK for processes that can't materialize dataless files) must not take the
+// whole list down: render that card as needing attention and keep the rest live.
+function degradedSummary(p: Project, err: unknown): Awaited<ReturnType<typeof projectSummary>> {
+  const accent = accentColor(p);
+  const msg = err instanceof Error ? err.message : String(err);
+  console.error(`projectSummary(${p.name}) failed: ${msg}`);
+  return {
+    name: p.name, root: p.root, focus: p.cfg.focus ?? "", branch: "?",
+    dirty: 0, ahead: 0, behind: 0,
+    session: false, devPort: null, devUp: null,
+    agent: { procs: 0, state: "none" as const, detail: "", ageSec: null, age: "", wait: "" },
+    color: accent.css, icon: accent.icon,
+    plan: null, planStats: null, foundation: null,
+    attention: [`status unavailable: ${msg.split("\n")[0]}`],
+  };
+}
+
 async function projectDetail(p: Project) {
   const cwds = await claudeCwds();
   const [summary, git, windows, push, commits] = await Promise.all([
@@ -169,7 +187,8 @@ export function startServer(port = 4400, opts: ServerOpts = {}) {
 
       if (req.method === "GET" && url.pathname === "/api/projects") {
         const cwds = await claudeCwds();
-        const projects = await Promise.all(allProjects().map((p) => projectSummary(p, cwds)));
+        const projects = await Promise.all(allProjects().map((p) =>
+          projectSummary(p, cwds).catch((err) => degradedSummary(p, err))));
         // needs-attention first; within those, longest-waiting agent on top —
         // waiting time is the real cost signal when juggling many projects
         const waitSec = (p: (typeof projects)[number]) => (p.agent.state === "waiting" ? p.agent.ageSec ?? 0 : -1);

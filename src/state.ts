@@ -33,12 +33,17 @@ export function sh(cmd: string, args: string[], cwd?: string): { ok: boolean; ou
 }
 
 const execFileP = promisify(execFile);
-export async function shA(cmd: string, args: string[]): Promise<{ ok: boolean; out: string }> {
+// Hard cap per subprocess: the dashboard's request budget is ~10s, and a single
+// slow `git status` (e.g. a repo whose .git objects Dropbox evicted to online-only)
+// must degrade that one project, not stall every request and pile up orphaned gits.
+export const SH_TIMEOUT_MS = 6_000;
+export async function shA(cmd: string, args: string[], timeoutMs = SH_TIMEOUT_MS): Promise<{ ok: boolean; out: string; timedOut: boolean }> {
   try {
-    const r = await execFileP(cmd, args, { encoding: "utf8" });
-    return { ok: true, out: r.stdout.trim() };
-  } catch {
-    return { ok: false, out: "" };
+    const r = await execFileP(cmd, args, { encoding: "utf8", timeout: timeoutMs, killSignal: "SIGKILL" });
+    return { ok: true, out: r.stdout.trim(), timedOut: false };
+  } catch (e) {
+    const timedOut = (e as { signal?: string })?.signal === "SIGKILL";
+    return { ok: false, out: "", timedOut };
   }
 }
 
@@ -78,12 +83,13 @@ export interface GitState {
   isRepo: boolean; branch: string; dirty: string[];
   ahead: number | null; behind: number | null; hasUpstream: boolean;
   lastCommit: string; lastCommitAge: string; hasRemote: boolean;
+  slow: boolean; // `git status` exceeded SH_TIMEOUT_MS — dirty/ahead/behind are unknown, not clean
 }
 
 export async function gitState(root: string): Promise<GitState> {
   const s: GitState = {
     isRepo: false, branch: "", dirty: [], ahead: null, behind: null,
-    hasUpstream: false, lastCommit: "", lastCommitAge: "", hasRemote: false,
+    hasUpstream: false, lastCommit: "", lastCommitAge: "", hasRemote: false, slow: false,
   };
   if (!(await shA("git", ["-C", root, "rev-parse", "--git-dir"])).ok) return s;
   s.isRepo = true;
@@ -96,6 +102,7 @@ export async function gitState(root: string): Promise<GitState> {
   ]);
   s.branch = branch.out;
   s.dirty = porcelain.out ? porcelain.out.split("\n") : [];
+  s.slow = porcelain.timedOut || ab.timedOut;
   s.hasRemote = remote.out !== "";
   if (ab.ok) {
     s.hasUpstream = true;
@@ -173,6 +180,7 @@ export function attentionItems(p: Project, git: GitState, agent?: AgentInfo, pla
     const q = plan.direction.filter((d) => !d.done).length;
     if (q > 0) items.push(`${q} open question${q > 1 ? "s" : ""}`);
   }
+  if (git.slow) items.push(`git status timed out (${SH_TIMEOUT_MS / 1000}s) — repo files evicted to cloud-only?`);
   if (git.dirty.length > 0) items.push(`${git.dirty.length} uncommitted`);
   if (git.ahead) items.push(`${git.ahead} unpushed`);
   if (git.behind) items.push(`${git.behind} behind remote`);

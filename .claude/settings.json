@@ -67,7 +67,7 @@
       "mcp__chrome-devtools__list_pages",
       "Bash(kill *)",
       "Bash(pkill *)",
-      "Bash(\"/Users/yurisyuganov/Library/CloudStorage/Dropbox/_work_stuff_/projects/project-cockpit/bin/cockpit\" *)"
+      "Bash(\"/Users/yurisyuganov/Documents/projects/project-cockpit/bin/cockpit\" *)"
     ],
     "ask": [
       "Edit(.env*)",

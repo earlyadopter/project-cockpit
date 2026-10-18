@@ -34,3 +34,22 @@ These files have many dependents or complex logic. Extra care needed when modify
 ## Project-specific risks
 
 [Add risks specific to this project below. This section is preserved on upgrade.]
+
+### Dropbox "online-only" (dataless) files under project roots
+
+Applies to any project root under a cloud-synced folder (`~/Library/CloudStorage/...`).
+The owner's projects moved to `~/Documents/projects` in 2026-10, but a user's may not have:
+Dropbox evicts untouched files to cloud-only ("dataless" in `ls -lO`). Two failure modes, both seen 2026-08-23:
+
+- **launchd can't materialize them.** launchd jobs default to *not* materializing dataless
+  files, so `readFileSync` on an evicted `plan.md`/`CHANGELOG.md`/`.git/HEAD` fails with
+  `EDEADLK` (Darwin errno 11) — but the same read works from a shell. The plist written by
+  `cockpit dash --install` sets `MaterializeDatalessFiles=true`; after changing the plist
+  template, reinstall (`cockpit dash --uninstall && cockpit dash --install`).
+- **Evicted `.git/objects` make `git status` take minutes** (~1.2 s per loose object pulled
+  back from Dropbox). `shA()` kills any subprocess after `SH_TIMEOUT_MS` (6 s, under Bun's
+  10 s request idle timeout) and the card shows "git status timed out" instead of stalling
+  the whole `/api/projects` response. Fix the repo itself by re-materializing `.git`
+  (`find <repo>/.git -type f -flags +dataless -exec cat {} + > /dev/null`) and/or marking
+  the folder "Available offline" in Dropbox; `git gc` (packing loose objects) shrinks the
+  surface for next time.
